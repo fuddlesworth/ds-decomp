@@ -762,6 +762,7 @@ dependencies = [
  "encoding_rs",
  "image",
  "log",
+ "png",
  "rust-bitwriter",
  "serde",
  "serde-saphyr",
