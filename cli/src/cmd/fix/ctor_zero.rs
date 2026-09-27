@@ -195,7 +195,8 @@ impl FixCtorZero {
                         RelocationModule::Main
                         | RelocationModule::Itcm
                         | RelocationModule::Dtcm
-                        | RelocationModule::Autoload { .. } => {}
+                        | RelocationModule::Autoload { .. }
+                        | RelocationModule::LtdAutoload { .. } => {}
                     }
                 }
             }

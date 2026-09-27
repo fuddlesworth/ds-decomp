@@ -362,6 +362,9 @@ impl Relocation {
             RelocationModule::Autoload { index } => {
                 Some(ModuleKind::Autoload(AutoloadKind::Unknown(*index)))
             }
+            RelocationModule::LtdAutoload { index } => {
+                Some(ModuleKind::Autoload(AutoloadKind::Ltd(*index)))
+            }
         }
     }
 
@@ -496,6 +499,7 @@ pub enum RelocationModule {
     Itcm,
     Dtcm,
     Autoload { index: u32 },
+    LtdAutoload { index: u32 },
 }
 
 #[derive(Debug, Snafu)]
@@ -562,6 +566,7 @@ impl RelocationModule {
                     AutoloadKind::Itcm => Ok(Self::Itcm),
                     AutoloadKind::Dtcm => Ok(Self::Dtcm),
                     AutoloadKind::Unknown(index) => Ok(Self::Autoload { index }),
+                    AutoloadKind::Ltd(index) => Ok(Self::LtdAutoload { index }),
                 }
             }
             ModuleKind::Overlay(id) => {
@@ -650,6 +655,11 @@ impl RelocationModule {
                     ParseAutoloadIndexSnafu { context, value: options, error }.build()
                 })?,
             }),
+            "ltd_autoload" => Ok(Self::LtdAutoload {
+                index: parse_u32(options).map_err(|error| {
+                    ParseAutoloadIndexSnafu { context, value: options, error }.build()
+                })?,
+            }),
             _ => Err(Box::new(UnknownModuleSnafu { context, module: value }.build())),
         }
     }
@@ -670,6 +680,9 @@ impl RelocationModule {
             RelocationModule::Dtcm => module == ModuleKind::Autoload(AutoloadKind::Dtcm),
             RelocationModule::Autoload { index } => {
                 module == ModuleKind::Autoload(AutoloadKind::Unknown(*index))
+            }
+            RelocationModule::LtdAutoload { index } => {
+                module == ModuleKind::Autoload(AutoloadKind::Ltd(*index))
             }
         }
     }
@@ -702,6 +715,7 @@ impl From<ModuleKind> for RelocationModule {
                 AutoloadKind::Itcm => Self::Itcm,
                 AutoloadKind::Dtcm => Self::Dtcm,
                 AutoloadKind::Unknown(index) => Self::Autoload { index },
+                AutoloadKind::Ltd(index) => Self::LtdAutoload { index },
             },
         }
     }
@@ -724,6 +738,7 @@ impl Display for RelocationModule {
             RelocationModule::Itcm => write!(f, "itcm"),
             RelocationModule::Dtcm => write!(f, "dtcm"),
             RelocationModule::Autoload { index } => write!(f, "autoload({index})"),
+            RelocationModule::LtdAutoload { index } => write!(f, "ltd_autoload({index})"),
         }
     }
 }

@@ -15,6 +15,8 @@ pub struct AnalyzeExternalReferencesOptions<'a> {
     pub modules: &'a [Module],
     pub module_index: usize,
     pub symbol_maps: &'a mut SymbolMaps,
+    /// Adds symbols for calls into other modules that lead to no known function, see [`insert_external_call_target`].
+    pub allow_unknown_function_calls: bool,
 }
 
 #[derive(Debug, Snafu)]
@@ -130,7 +132,12 @@ fn add_function_calls_as_relocations(
     result: &mut RelocationResult,
     options: &mut AnalyzeExternalReferencesOptions,
 ) -> Result<(), AnalyzeExternalReferencesError> {
-    let AnalyzeExternalReferencesOptions { modules, module_index, symbol_maps } = options;
+    let AnalyzeExternalReferencesOptions {
+        modules,
+        module_index,
+        symbol_maps,
+        allow_unknown_function_calls,
+    } = options;
 
     for (&address, &called_function) in iter_function_calls(function) {
         let local_module = &modules[*module_index];
@@ -196,7 +203,13 @@ fn add_function_calls_as_relocations(
 
                 mode.into_thumb() == Some(called_function.thumb)
             });
-            RelocationModule::from_modules(candidates)?
+            let module = RelocationModule::from_modules(candidates)?;
+            if module == RelocationModule::None && *allow_unknown_function_calls {
+                insert_external_call_target(modules, *module_index, symbol_maps, address, called_function)?
+                    .map_or(module, |target| target.kind().into())
+            } else {
+                module
+            }
         };
 
         if module == RelocationModule::None {
@@ -224,6 +237,52 @@ fn add_function_calls_as_relocations(
         }
     }
     Ok(())
+}
+
+/// Adds a symbol for a call into another module which leads to no known function: an external label if the destination
+/// is inside a function, otherwise an unknown function. Returns the destination module, or `None` if no other module or
+/// several overlays contain the destination.
+fn insert_external_call_target<'a>(
+    modules: &'a [Module],
+    module_index: usize,
+    symbol_maps: &mut SymbolMaps,
+    from: u32,
+    called_function: CalledFunction,
+) -> Result<Option<&'a Module>, AnalyzeExternalReferencesError> {
+    let mut containing = modules.iter().enumerate().filter(|&(index, module)| {
+        index != module_index
+            && module.sections().get_by_contained_address(called_function.address).is_some()
+    });
+    let Some((_, target)) = containing.next() else { return Ok(None) };
+    if containing.next().is_some() {
+        return Ok(None);
+    }
+
+    let from_kind = modules[module_index].kind();
+    let symbol_map = symbol_maps.get_mut(target.kind());
+    let containing_function = symbol_map
+        .get_function_containing(called_function.address)
+        .map(|(_, symbol)| (symbol.name.clone(), symbol.addr));
+    if let Some((name, addr)) = containing_function {
+        log::warn!(
+            "Function call from {from:#010x} in {from_kind} to {:#010x} goes to middle of function '{name}' at {addr:#010x} in {}, adding an external label symbol",
+            called_function.address,
+            target.kind()
+        );
+        symbol_map.add_external_label(called_function.address, called_function.thumb)?;
+    } else if symbol_map.get_label(called_function.address)?.is_some() {
+        symbol_map.add_external_label(called_function.address, called_function.thumb)?;
+    } else {
+        log::warn!(
+            "Function call from {from:#010x} in {from_kind} to {:#010x} in {} leads to no function, inserting an unknown function symbol",
+            called_function.address,
+            target.kind()
+        );
+        let function_address = called_function.address | called_function.thumb as u32;
+        let name = format!("{}{:08x}_unk", target.default_func_prefix, function_address);
+        symbol_map.add_unknown_function(name, function_address, called_function.thumb);
+    }
+    Ok(Some(target))
 }
 
 fn find_external_data_from_pools(
@@ -279,7 +338,9 @@ fn find_symbol_candidates(
             }
             let (section_index, section) = module.sections().get_by_contained_address(pointer)?;
             let symbol_map = options.symbol_maps.get(module.kind()).unwrap();
-            if section.kind() == SectionKind::Code {
+            // Functions can also end up outside code sections, such as unknown functions called from other modules
+            let points_to_function = symbol_map.get_function(pointer).ok().flatten().is_some();
+            if section.kind() == SectionKind::Code || points_to_function {
                 let (_, symbol) = symbol_map.by_address(pointer & !1).unwrap()?;
                 let symbol_is_thumb = match &symbol.kind {
                     SymbolKind::Function(function) => function.mode == InstructionMode::Thumb,

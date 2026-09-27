@@ -450,11 +450,13 @@ impl Module {
         symbol_maps: &mut SymbolMaps,
         options: &AnalysisOptions,
     ) -> Result<Self, ModuleError> {
-        let AutoloadKind::Unknown(autoload_index) = autoload.kind() else {
-            return NotAnUnknownAutoloadSnafu.fail();
+        let name = match autoload.kind() {
+            AutoloadKind::Unknown(index) => format!("autoload_{index}"),
+            AutoloadKind::Ltd(index) => format!("ltd_autoload_{index}"),
+            AutoloadKind::Itcm | AutoloadKind::Dtcm => return NotAnUnknownAutoloadSnafu.fail(),
         };
         let mut module = Self {
-            name: format!("autoload_{autoload_index}"),
+            name,
             kind: ModuleKind::Autoload(autoload.kind()),
             relocations: Relocations::new(),
             code: autoload.code().to_vec(),
@@ -1252,7 +1254,7 @@ impl Module {
         autoload: &Autoload,
     ) -> Result<(), ModuleError> {
         let base_address = autoload.base_address();
-        let AutoloadKind::Unknown(autoload_index) = autoload.kind() else {
+        let (AutoloadKind::Unknown(_) | AutoloadKind::Ltd(_)) = autoload.kind() else {
             panic!("Not an unknown autoload: {}", autoload.kind());
         };
         let code = autoload.code();
@@ -1300,7 +1302,8 @@ impl Module {
         let rodata_start = text_end.next_multiple_of(4);
         let rodata_end = rodata_start.next_multiple_of(32);
         log::warn!(
-            "Cannot determine size of .rodata in unknown autoload {autoload_index}, using {rodata_start:#010x}..{rodata_end:#010x}",
+            "Cannot determine size of .rodata in {}, using {rodata_start:#010x}..{rodata_end:#010x}",
+            self.kind
         );
         self.add_rodata_section(rodata_start, rodata_end)?;
 
@@ -1561,6 +1564,7 @@ impl Display for ModuleKind {
                 AutoloadKind::Itcm => write!(f, "ITCM"),
                 AutoloadKind::Dtcm => write!(f, "DTCM"),
                 AutoloadKind::Unknown(index) => write!(f, "autoload {index}"),
+                AutoloadKind::Ltd(index) => write!(f, "LTD autoload {index}"),
             },
         }
     }

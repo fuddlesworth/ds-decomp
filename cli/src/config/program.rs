@@ -83,6 +83,7 @@ impl Program {
                     modules: &self.modules,
                     module_index,
                     symbol_maps: &mut self.symbol_maps,
+                    allow_unknown_function_calls: options.allow_unknown_function_calls,
                 })?;
 
             let module_relocations = self.modules[module_index].relocations_mut();
@@ -114,8 +115,10 @@ impl Program {
                         );
                         let symbol_map =
                             self.symbol_maps.get_mut(self.modules[module_index].kind());
+                        let points_to_function = symbol_map.get_function(symbol.address)?.is_some();
                         match section_kind {
                             SectionKind::Code => {} // Function symbol, already verified to exist
+                            _ if points_to_function => {} // Function outside a code section
                             SectionKind::Data | SectionKind::Rodata => {
                                 symbol_map.add_data(Some(name), symbol.address, SymData::Any)?;
                             }
@@ -135,8 +138,11 @@ impl Program {
                             );
                             let symbol_map =
                                 self.symbol_maps.get_mut(self.modules[module_index].kind());
+                            let points_to_function =
+                                symbol_map.get_function(symbol.address)?.is_some();
                             match section_kind {
                                 SectionKind::Code => {} // Function symbol, already verified to exist
+                                _ if points_to_function => {} // Function outside a code section
                                 SectionKind::Data | SectionKind::Rodata => {
                                     symbol_map.add_ambiguous_data(
                                         Some(name),

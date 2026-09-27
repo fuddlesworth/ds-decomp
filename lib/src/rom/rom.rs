@@ -1,6 +1,9 @@
 use std::borrow::Cow;
 
-use ds_rom::rom::{Arm9AutoloadError, Rom, raw::RawBuildInfoError};
+use ds_rom::rom::{
+    Arm9AutoloadError, Rom,
+    raw::{AutoloadKind, RawBuildInfoError},
+};
 use snafu::Snafu;
 
 use crate::config::module::ModuleKind;
@@ -35,6 +38,14 @@ impl RomExt for Rom<'_> {
                 .ok_or_else(|| RomGetCodeError::ModuleNotFound { module_kind: kind })?
                 .code()
                 .into()),
+            ModuleKind::Autoload(AutoloadKind::Ltd(_)) => {
+                let autoload = self
+                    .dsi()
+                    .and_then(|dsi| dsi.ltd())
+                    .and_then(|ltd| ltd.autoloads().iter().find(|a| ModuleKind::Autoload(a.kind()) == kind))
+                    .ok_or_else(|| RomGetCodeError::ModuleNotFound { module_kind: kind })?;
+                Ok(autoload.code().to_owned().into())
+            }
             ModuleKind::Autoload(autoload_kind) => {
                 let autoloads = self.arm9().autoloads()?;
                 let autoload = autoloads

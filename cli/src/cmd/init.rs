@@ -90,8 +90,10 @@ impl Init {
             .iter()
             .map(|ov| Ok(Module::analyze_overlay(ov, &mut symbol_maps, &analysis_options)?))
             .collect::<Result<Vec<_>>>()?;
+        let ltd_autoloads = rom.dsi().and_then(|dsi| dsi.ltd()).map(|ltd| ltd.autoloads()).unwrap_or_default();
         let autoloads = autoloads
             .iter()
+            .chain(ltd_autoloads)
             .map(|autoload| match autoload.kind() {
                 AutoloadKind::Itcm => {
                     Ok(Module::analyze_itcm(autoload, &mut symbol_maps, &analysis_options)?)
@@ -99,7 +101,7 @@ impl Init {
                 AutoloadKind::Dtcm => {
                     Ok(Module::analyze_dtcm(autoload, &mut symbol_maps, &analysis_options)?)
                 }
-                AutoloadKind::Unknown(_) => Ok(Module::analyze_unknown_autoload(
+                AutoloadKind::Unknown(_) | AutoloadKind::Ltd(_) => Ok(Module::analyze_unknown_autoload(
                     autoload,
                     &mut symbol_maps,
                     &analysis_options,
@@ -121,6 +123,12 @@ impl Init {
             autoload.files.bin =
                 self.build_path.join(format!("build/autoload_{}.bin", autoload.index));
         });
+        if let Some(dsi) = &mut rom_config.dsi {
+            dsi.ltd_autoloads.iter_mut().for_each(|autoload| {
+                autoload.files.bin =
+                    self.build_path.join(format!("build/ltd_autoload_{}.bin", autoload.index));
+            });
+        }
         rom_config.arm9_overlays = Some(self.build_path.join("build/arm9_overlays.yaml"));
         let rom_config = rom_config;
 
@@ -233,6 +241,18 @@ impl Init {
                         bail!("Unknown autoload index {index} not found in ROM config file");
                     };
                     let name = format!("autoload_{index}");
+                    (name, &rom_autoload.files.bin)
+                }
+                AutoloadKind::Ltd(index) => {
+                    let Some(rom_autoload) = rom_config
+                        .dsi
+                        .as_ref()
+                        .and_then(|dsi| dsi.ltd_autoloads.iter().find(|a| a.index == index))
+                    else {
+                        log::error!("LTD autoload index {index} not found in ROM config file");
+                        bail!("LTD autoload index {index} not found in ROM config file");
+                    };
+                    let name = format!("ltd_autoload_{index}");
                     (name, &rom_autoload.files.bin)
                 }
             };

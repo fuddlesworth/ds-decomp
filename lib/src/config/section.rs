@@ -553,6 +553,8 @@ impl MigrateSection {
             ModuleKind::Autoload(AutoloadKind::Unknown(index)) => {
                 vec![MigrateSection::AutoloadData(index), MigrateSection::AutoloadBss(index)]
             }
+            // The LTD module is loaded separately from the ARM9 program, so its sections stay in it
+            ModuleKind::Autoload(AutoloadKind::Ltd(_)) => vec![],
         }
     }
 

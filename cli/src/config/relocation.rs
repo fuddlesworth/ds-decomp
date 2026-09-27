@@ -105,6 +105,9 @@ impl RelocationModuleExt for RelocationModule {
             RelocationModule::Autoload { index } => {
                 Some(ModuleKind::Autoload(AutoloadKind::Unknown(*index)))
             }
+            RelocationModule::LtdAutoload { index } => {
+                Some(ModuleKind::Autoload(AutoloadKind::Ltd(*index)))
+            }
         }
     }
 
@@ -120,6 +123,7 @@ impl RelocationModuleExt for RelocationModule {
             RelocationModule::Itcm => None,
             RelocationModule::Dtcm => None,
             RelocationModule::Autoload { .. } => None,
+            RelocationModule::LtdAutoload { .. } => None,
         }
     }
 }

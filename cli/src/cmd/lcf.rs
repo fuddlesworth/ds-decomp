@@ -203,6 +203,9 @@ impl Lcf {
                 AutoloadKind::Unknown(autoload_index) => {
                     format!("autoload_{autoload_index:03}.lcf")
                 }
+                AutoloadKind::Ltd(autoload_index) => {
+                    format!("ltd_autoload_{autoload_index:03}.lcf")
+                }
             },
             ModuleKind::Overlay(overlay_id) => format!("overlay_{overlay_id:03}.lcf"),
         }
@@ -275,6 +278,7 @@ impl LcfModule {
                 AutoloadKind::Itcm => "ITCM".to_string(),
                 AutoloadKind::Dtcm => "DTCM".to_string(),
                 AutoloadKind::Unknown(autoload_index) => format!("AUTOLOAD_{autoload_index}"),
+                AutoloadKind::Ltd(autoload_index) => format!("LTD_AUTOLOAD_{autoload_index}"),
             },
             ModuleKind::Overlay(overlay_id) => format!("OV{overlay_id:03}"),
         };
@@ -423,6 +427,18 @@ impl LinkModules {
                 config,
                 delinks_map,
             )?);
+        }
+
+        // The ARM9i program's LTD autoloads are linked at their own addresses
+        if let Some(ltd) = rom.dsi().and_then(|dsi| dsi.ltd()) {
+            for autoload in ltd.autoloads() {
+                modules.push(LcfModule::new(
+                    ModuleKind::Autoload(autoload.kind()),
+                    format!("{:#010x}", autoload.base_address()),
+                    config,
+                    delinks_map,
+                )?);
+            }
         }
         Ok(Self { modules, last_static_index: prev_static_index })
     }

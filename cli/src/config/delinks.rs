@@ -276,6 +276,7 @@ impl DelinkFileExt for DelinkFile {
                 AutoloadKind::Itcm => format!("{GAP_FILE_PREFIX}itcm_{id}"),
                 AutoloadKind::Dtcm => format!("{GAP_FILE_PREFIX}dtcm_{id}"),
                 AutoloadKind::Unknown(index) => format!("{GAP_FILE_PREFIX}autoload_{index}_{id}"),
+                AutoloadKind::Ltd(index) => format!("{GAP_FILE_PREFIX}ltd_autoload_{index}_{id}"),
             },
         };
 

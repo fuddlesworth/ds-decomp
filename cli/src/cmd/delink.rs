@@ -66,6 +66,10 @@ pub struct ModuleFilterArgs {
     /// Include autoload(s) and exclude unspecified modules.
     #[arg(long)]
     pub autoload: Vec<u32>,
+
+    /// Include LTD autoload(s) of DSi titles and exclude unspecified modules.
+    #[arg(long)]
+    pub ltd_autoload: Vec<u32>,
 }
 
 struct Delinker<'a> {
@@ -115,6 +119,7 @@ impl ModuleFilterArgs {
             && !self.itcm
             && !self.dtcm
             && self.autoload.is_empty()
+            && self.ltd_autoload.is_empty()
     }
 
     pub fn has(&self, module: ModuleKind) -> bool {
@@ -127,6 +132,7 @@ impl ModuleFilterArgs {
             ModuleKind::Autoload(AutoloadKind::Itcm) => self.itcm,
             ModuleKind::Autoload(AutoloadKind::Dtcm) => self.dtcm,
             ModuleKind::Autoload(AutoloadKind::Unknown(index)) => self.autoload.contains(&index),
+            ModuleKind::Autoload(AutoloadKind::Ltd(index)) => self.ltd_autoload.contains(&index),
         }
     }
 }

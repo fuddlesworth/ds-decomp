@@ -170,6 +170,8 @@ impl ConfigRom {
                 arm9i: Self::make_path(old.join(&dsi.arm9i), new),
                 arm7i: Self::make_path(old.join(&dsi.arm7i), new),
                 region_prefix: Self::make_path(old.join(&dsi.region_prefix), new),
+                // The LTD autoloads are linked, so these paths are replaced in `config_autoloads`
+                ltd_autoloads: dsi.ltd_autoloads.clone(),
             };
             rom_paths.dsi = Some(dsi);
         }
@@ -290,7 +292,10 @@ impl ConfigRom {
 
         let config_path = self.config.parent().unwrap();
 
-        let rom_autoloads = rom.arm9().autoloads()?;
+        let mut rom_autoloads = rom.arm9().autoloads()?.to_vec();
+        if let Some(ltd) = rom.dsi().and_then(|dsi| dsi.ltd()) {
+            rom_autoloads.extend(ltd.autoloads().iter().cloned());
+        }
         for autoload in &config.autoloads {
             let delinks = Delinks::from_file(
                 config_path.join(&autoload.module.delinks),
@@ -306,6 +311,7 @@ impl ConfigRom {
                 AutoloadKind::Itcm => "ITCM".into(),
                 AutoloadKind::Dtcm => "DTCM".into(),
                 AutoloadKind::Unknown(index) => format!("AUTOLOAD_{index}"),
+                AutoloadKind::Ltd(index) => format!("LTD_AUTOLOAD_{index}"),
             };
 
             let mut autoload_info = *rom_autoload.info();
@@ -360,6 +366,15 @@ impl ConfigRom {
                         .with_context(|| {
                             format!("Failed to find autoload {} in ROM config", index)
                         })?;
+                    autoload.files.bin = Self::make_path(binary_path, rom_paths_dir);
+                    autoload.files.config = Self::make_path(yaml_path, rom_paths_dir);
+                }
+                AutoloadKind::Ltd(index) => {
+                    let autoload = rom_paths
+                        .dsi
+                        .as_mut()
+                        .and_then(|dsi| dsi.ltd_autoloads.iter_mut().find(|a| a.index == index))
+                        .with_context(|| format!("Failed to find LTD autoload {index} in ROM config"))?;
                     autoload.files.bin = Self::make_path(binary_path, rom_paths_dir);
                     autoload.files.config = Self::make_path(yaml_path, rom_paths_dir);
                 }
