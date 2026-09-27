@@ -7,7 +7,7 @@ use std::{
 };
 
 use ds_rom::{
-    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult},
+    crypto::dsprot::{self, DsProtDecryptOptions, DsProtDecryptResult, DsProtRelocation},
     rom::{
         Arm9, Arm9DsProtInfoError, Autoload, Overlay, OverlayDsProtError,
         raw::{AutoloadKind, RawBuildInfoError},
@@ -59,6 +59,8 @@ pub struct Module {
     pub default_sinit_prefix: String,
     sections: Sections,
     signed: bool,
+    /// DS Protect relocations to other modules, resolved by the cross-module analysis.
+    dsprot_external_relocations: Vec<DsProtRelocation>,
 }
 
 #[derive(Debug, Snafu)]
@@ -170,6 +172,7 @@ impl Module {
             default_sinit_prefix,
             sections,
             signed,
+            dsprot_external_relocations: vec![],
         })
     }
 
@@ -200,6 +203,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            dsprot_external_relocations: vec![],
         })
     }
 
@@ -238,6 +242,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            dsprot_external_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -299,6 +304,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{id:03}_"),
             sections,
             signed,
+            dsprot_external_relocations: vec![],
         })
     }
 
@@ -332,6 +338,7 @@ impl Module {
             default_sinit_prefix: format!("__sinit_ov{:03}_", overlay.id()),
             sections: Sections::new(),
             signed: overlay.originally_signed(),
+            dsprot_external_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -379,6 +386,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections,
             signed: false,
+            dsprot_external_relocations: vec![],
         })
     }
 
@@ -399,6 +407,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            dsprot_external_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -426,6 +435,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            dsprot_external_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -455,6 +465,7 @@ impl Module {
             default_sinit_prefix: "__sinit_".to_string(),
             sections: Sections::new(),
             signed: false,
+            dsprot_external_relocations: vec![],
         };
         let symbol_map = symbol_maps.get_mut(module.kind);
 
@@ -810,16 +821,17 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         let rodata_end = if let Some(init_functions) = self.add_ctor_section(&ctor, symbol_map)? {
-            if let Some((init_start, _)) =
-                self.add_init_section(symbol_map, AddInitSectionOptions {
+            if let Some((init_start, _)) = self.add_init_section(
+                symbol_map,
+                AddInitSectionOptions {
                     ctor: &ctor,
                     init_functions,
                     continuous: true,
                     overriden_function_sizes,
                     dsprot_encrypted_functions,
                     dsprot_encrypted_ranges,
-                })?
-            {
+                },
+            )? {
                 init_start
             } else {
                 ctor.start
@@ -889,24 +901,26 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         // .ctor and .init
-        let (read_only_end, rodata_start) = if let Some(init_functions) =
-            self.add_ctor_section(ctor, symbol_map)?
-        {
-            if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
-                ctor,
-                init_functions,
-                continuous: false,
-                overriden_function_sizes,
-                dsprot_encrypted_functions,
-                dsprot_encrypted_ranges,
-            })? {
-                (init_range.0, Some(init_range.1))
+        let (read_only_end, rodata_start) =
+            if let Some(init_functions) = self.add_ctor_section(ctor, symbol_map)? {
+                if let Some(init_range) = self.add_init_section(
+                    symbol_map,
+                    AddInitSectionOptions {
+                        ctor,
+                        init_functions,
+                        continuous: false,
+                        overriden_function_sizes,
+                        dsprot_encrypted_functions,
+                        dsprot_encrypted_ranges,
+                    },
+                )? {
+                    (init_range.0, Some(init_range.1))
+                } else {
+                    (ctor.start, None)
+                }
             } else {
                 (ctor.start, None)
-            }
-        } else {
-            (ctor.start, None)
-        };
+            };
 
         // Secure area functions (software interrupts)
         let secure_area = &self.code[..0x800];
@@ -1409,11 +1423,12 @@ impl Module {
         options: &AnalysisOptions,
     ) -> Result<(), ModuleError> {
         if let Some(bss_variable) = dsprot_result.bss_variable {
+            let name = dsprot_bss_symbol_name(self.kind);
             if symbol_map.by_address(bss_variable)?.is_some() {
-                symbol_map.rename_by_address(bss_variable, DSPROT_BSS_SYMBOL_NAME)?;
+                symbol_map.rename_by_address(bss_variable, &name)?;
             } else {
                 symbol_map.add(Symbol {
-                    name: DSPROT_BSS_SYMBOL_NAME.to_string(),
+                    name,
                     kind: SymbolKind::Bss(SymBss { size: None }),
                     addr: bss_variable,
                     ambiguous: false,
@@ -1442,15 +1457,12 @@ impl Module {
                 actual_value
             );
 
-            // Add relocation and destination symbol
-            let (_, section) =
-                self.sections.get_by_contained_address(relocation.to_address).ok_or_else(|| {
-                    InvalidDsProtRelocSnafu {
-                        from: relocation.from_address,
-                        to: relocation.to_address,
-                    }
-                    .build()
-                })?;
+            // Add relocation and destination symbol. Relocations to other modules are added by the cross-module analysis.
+            let Some((_, section)) = self.sections.get_by_contained_address(relocation.to_address)
+            else {
+                self.dsprot_external_relocations.push(relocation);
+                continue;
+            };
             let symbol_name = format!("{}{:08x}", self.default_data_prefix, relocation.to_address);
             match section.kind() {
                 SectionKind::Code => {}
@@ -1458,8 +1470,11 @@ impl Module {
                     symbol_map.add_data(Some(symbol_name), relocation.to_address, SymData::Any)?;
                 }
                 SectionKind::Bss => {
-                    symbol_map
-                        .add_bss(Some(symbol_name), relocation.to_address, SymBss { size: None })?;
+                    symbol_map.add_bss(
+                        Some(symbol_name),
+                        relocation.to_address,
+                        SymBss { size: None },
+                    )?;
                 }
             }
             let reloc = self.relocations.add(Relocation::new(RelocationOptions {
@@ -1475,6 +1490,10 @@ impl Module {
             }
         }
         Ok(())
+    }
+
+    pub fn dsprot_external_relocations(&self) -> &[DsProtRelocation] {
+        &self.dsprot_external_relocations
     }
 
     pub fn relocations(&self) -> &Relocations {
@@ -1580,6 +1599,14 @@ pub struct AnalysisOptions {
 }
 
 pub const DSPROT_BSS_SYMBOL_NAME: &str = "DSProt_BSS";
+
+/// Name of the DS Protect .bss variable in a module. Overlays get a suffix, as several overlays can contain DS Protect.
+pub fn dsprot_bss_symbol_name(module_kind: ModuleKind) -> String {
+    match module_kind {
+        ModuleKind::Overlay(id) => format!("{DSPROT_BSS_SYMBOL_NAME}_ov{id:03}"),
+        ModuleKind::Arm9 | ModuleKind::Autoload(_) => DSPROT_BSS_SYMBOL_NAME.to_string(),
+    }
+}
 
 fn create_overriden_function_sizes(dsprot_result: &DsProtDecryptResult) -> BTreeMap<u32, u32> {
     dsprot_result

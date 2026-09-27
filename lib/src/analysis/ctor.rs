@@ -34,12 +34,8 @@ pub enum CtorRangeError {
 }
 
 impl CtorRange {
-    fn find_last_function_call(
-        function: &Function,
-        module_code: &[u8],
-        base_address: u32,
-    ) -> Option<u32> {
-        let mut last_called_function = None;
+    fn find_function_calls(function: &Function, module_code: &[u8], base_address: u32) -> Vec<u32> {
+        let mut called_functions = vec![];
         for (address, _ins, parsed_ins) in function.parser(module_code, base_address) {
             if !parsed_ins.mnemonic.starts_with("bl") {
                 continue;
@@ -48,9 +44,9 @@ impl CtorRange {
                 continue;
             };
             let dest = (address as i32 + offset) as u32;
-            last_called_function = Some(dest);
+            called_functions.push(dest);
         }
-        last_called_function
+        called_functions
     }
 
     pub fn find_in_arm9(
@@ -84,17 +80,42 @@ impl CtorRange {
             Err(e) => return Err(e.into()),
         };
 
-        let run_inits_addr = Self::find_last_function_call(&entry_func, entry_code, entry_addr)
-            .ok_or_else(|| NoEntryFunctionCallsSnafu.build())?;
+        // The .ctor runner is normally the last function called by the entrypoint, but TWL-SDK entrypoints call other
+        // functions after it. Try the calls from last to first until one reads a .ctor list in the ARM9 program.
+        let called_functions = Self::find_function_calls(&entry_func, entry_code, entry_addr);
+        if called_functions.is_empty() {
+            return NoEntryFunctionCallsSnafu.fail();
+        }
+        let mut first_error = None;
+        for &run_inits_addr in called_functions.iter().rev() {
+            match Self::parse_ctor_runner(arm9, code, unknown_autoloads, run_inits_addr) {
+                Ok(Some(ctor_range)) => return Ok(ctor_range),
+                Ok(None) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        Err(first_error.unwrap_or_else(|| NoInitPoolConstantsSnafu.build()))
+    }
 
-        let run_inits_offset = (run_inits_addr - arm9.base_address()) as usize;
+    /// Parses a candidate .ctor runner. Returns `None` if its first pool constant is not a null-terminated list within the
+    /// ARM9 program.
+    fn parse_ctor_runner(
+        arm9: &Arm9,
+        code: &[u8],
+        unknown_autoloads: &[&Autoload],
+        run_inits_addr: u32,
+    ) -> Result<Option<Self>, CtorRangeError> {
+        let run_inits_offset = run_inits_addr.wrapping_sub(arm9.base_address()) as usize;
         let (run_inits_module_start, run_inits_module_end, run_inits_code) =
             if run_inits_offset < code.len() {
                 (arm9.base_address(), arm9.end_address()?, &code[run_inits_offset..])
             } else {
                 // .ctor is in one of the unknown autoloads
                 let run_inits_autoload = unknown_autoloads.iter().find(|autoload| {
-                    let run_inits_offset = (run_inits_addr - autoload.base_address()) as usize;
+                    let run_inits_offset =
+                        run_inits_addr.wrapping_sub(autoload.base_address()) as usize;
                     run_inits_offset < autoload.code().len()
                 });
                 let Some(run_inits_autoload) = run_inits_autoload else {
@@ -151,16 +172,23 @@ impl CtorRange {
             ctor_start_data[3],
         ]);
 
-        let num_ctors = code[(ctor_start - arm9.base_address()) as usize..]
+        let Some(ctor_offset) =
+            ctor_start.checked_sub(arm9.base_address()).filter(|&o| (o as usize) < code.len())
+        else {
+            return Ok(None);
+        };
+        let Some(num_ctors) = code[ctor_offset as usize..]
             .as_chunks::<4>()
             .0
             .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .position(|ctor| ctor == 0)
-            .unwrap();
+        else {
+            return Ok(None);
+        };
 
         let ctor_end = ctor_start + num_ctors as u32 * 4 + 4;
 
-        Ok(Self { start: ctor_start, end: ctor_end })
+        Ok(Some(Self { start: ctor_start, end: ctor_end }))
     }
 }

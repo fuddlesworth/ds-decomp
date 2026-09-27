@@ -8,3 +8,6 @@ lto = true
 [profile.release-fast]
 inherits = "release"
 lto = false
+
+[patch.crates-io]
+ds-rom = { path = "../ds-rom/lib" }

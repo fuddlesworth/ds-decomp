@@ -47,7 +47,40 @@ pub fn analyze_external_references(
     let mut result = RelocationResult::new();
     find_relocations_in_functions(&mut result, options)?;
     find_external_references_in_sections(options, &mut result)?;
+    add_dsprot_external_relocations(options, &mut result)?;
     Ok(result)
+}
+
+fn add_dsprot_external_relocations(
+    options: &mut AnalyzeExternalReferencesOptions,
+    result: &mut RelocationResult,
+) -> Result<(), AnalyzeExternalReferencesError> {
+    let dsprot_relocations =
+        options.modules[options.module_index].dsprot_external_relocations().to_vec();
+    for relocation in dsprot_relocations {
+        let candidates = find_symbol_candidates(options, relocation.to_address);
+        if candidates.is_empty() {
+            log::warn!(
+                "DS Protect relocation from {:#010x} in {} to {:#010x} leads to no module",
+                relocation.from_address,
+                options.modules[options.module_index].kind(),
+                relocation.to_address
+            );
+            continue;
+        }
+        let candidate_modules = candidates.iter().map(|c| &options.modules[c.module_index]);
+        let module = RelocationModule::from_modules(candidate_modules)?;
+        // The pool scan reads the encoded pointer as-is, so replace its relocation with the decoded one
+        result.relocations.retain(|r| r.from_address() != relocation.from_address);
+        result.relocations.push(Relocation::new_load(
+            relocation.from_address,
+            relocation.to_address,
+            relocation.addend as i64,
+            module,
+        ));
+        result.external_symbols.push(ExternalSymbol { candidates, address: relocation.to_address });
+    }
+    Ok(())
 }
 
 fn find_external_references_in_sections(

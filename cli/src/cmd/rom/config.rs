@@ -9,8 +9,8 @@ use ds_decomp::config::{
     config::Config,
     delinks::Delinks,
     module::{
-        AUTOLOAD_CALLBACK_SYMBOL_NAME, BUILD_INFO_SYMBOL_NAME, DSPROT_BSS_SYMBOL_NAME, ModuleKind,
-        OVERLAY_SIGNATURES_SYMBOL_NAME,
+        AUTOLOAD_CALLBACK_SYMBOL_NAME, BUILD_INFO_SYMBOL_NAME, ModuleKind,
+        OVERLAY_SIGNATURES_SYMBOL_NAME, dsprot_bss_symbol_name,
     },
     section::{Section, Sections},
     symbol::{SymbolMap, SymbolMaps},
@@ -19,7 +19,7 @@ use ds_rom::{
     crypto::dsprot::{self, DsProtDecryptResult, DsProtFunction, DsProtState},
     rom::{
         Arm9BuildConfig, Arm9Offsets, OverlayConfig, OverlayTableConfig, Rom, RomConfig,
-        RomLoadOptions, raw::AutoloadKind,
+        RomConfigDsi, RomLoadOptions, raw::AutoloadKind,
     },
 };
 use object::{ObjectSection, ObjectSymbol};
@@ -56,15 +56,18 @@ impl ConfigRom {
         let old_rom_paths_path = config_path.join(&config.rom_config);
         let rom_extract_dir = old_rom_paths_path.parent().unwrap();
 
-        let rom = Rom::load(&old_rom_paths_path, RomLoadOptions {
-            key: None,
-            compress: false,
-            encrypt: false,
-            load_files: false,
-            load_header: false,
-            load_banner: false,
-            load_multiboot_signature: false,
-        })?;
+        let rom = Rom::load(
+            &old_rom_paths_path,
+            RomLoadOptions {
+                key: None,
+                compress: false,
+                encrypt: false,
+                load_files: false,
+                load_header: false,
+                load_banner: false,
+                load_multiboot_signature: false,
+            },
+        )?;
 
         let mut rom_paths = rom.config().clone();
         let main_module_path = config_path.join(&config.main_module.object);
@@ -76,27 +79,36 @@ impl ConfigRom {
         let object = object::File::parse(&*file)?;
         let object_cache = ObjectCache::new(&object);
 
-        self.config_arm9(&mut rom_paths, ConfigArm9Options {
-            object_cache: &object_cache,
-            config: &config,
-            rom: &rom,
-            rom_paths_dir: new_rom_paths_dir,
-            symbol_map: symbol_maps.get_mut(ModuleKind::Arm9),
-        })?;
-        self.config_autoloads(&mut rom_paths, ConfigAutoloadsOptions {
-            object_cache: &object_cache,
-            config: &config,
-            rom: &rom,
-            rom_paths_dir: new_rom_paths_dir,
-        })?;
-        self.config_overlays(&mut rom_paths, ConfigOverlaysOptions {
-            object_cache: &object_cache,
-            config: &config,
-            rom: &rom,
-            rom_paths_dir: new_rom_paths_dir,
-            rom_extract_dir,
-            symbol_maps: &symbol_maps,
-        })?;
+        self.config_arm9(
+            &mut rom_paths,
+            ConfigArm9Options {
+                object_cache: &object_cache,
+                config: &config,
+                rom: &rom,
+                rom_paths_dir: new_rom_paths_dir,
+                symbol_map: symbol_maps.get_mut(ModuleKind::Arm9),
+            },
+        )?;
+        self.config_autoloads(
+            &mut rom_paths,
+            ConfigAutoloadsOptions {
+                object_cache: &object_cache,
+                config: &config,
+                rom: &rom,
+                rom_paths_dir: new_rom_paths_dir,
+            },
+        )?;
+        self.config_overlays(
+            &mut rom_paths,
+            ConfigOverlaysOptions {
+                object_cache: &object_cache,
+                config: &config,
+                rom: &rom,
+                rom_paths_dir: new_rom_paths_dir,
+                rom_extract_dir,
+                symbol_maps: &symbol_maps,
+            },
+        )?;
 
         serde_saphyr::to_io_writer(
             &mut create_file(new_rom_paths_dir.join("rom_config.yaml"))?,
@@ -119,6 +131,7 @@ impl ConfigRom {
             path_order,
             arm9_hmac_sha1_key,
             multiboot_signature,
+            dsi,
 
             // These files will be remade
             arm9_bin: _,
@@ -129,6 +142,7 @@ impl ConfigRom {
             arm9_overlays: _,
 
             // Other non-path values
+            arm9_footer: _,
             alignment: _,
             padding: _,
         } = rom_paths;
@@ -149,6 +163,15 @@ impl ConfigRom {
         if let Some(multiboot_signature) = multiboot_signature {
             rom_paths.multiboot_signature =
                 Some(Self::make_path(old.join(multiboot_signature), new));
+        }
+        if let Some(dsi) = dsi {
+            let dsi = RomConfigDsi {
+                config: Self::make_path(old.join(&dsi.config), new),
+                arm9i: Self::make_path(old.join(&dsi.arm9i), new),
+                arm7i: Self::make_path(old.join(&dsi.arm7i), new),
+                region_prefix: Self::make_path(old.join(&dsi.region_prefix), new),
+            };
+            rom_paths.dsi = Some(dsi);
         }
     }
 
@@ -226,6 +249,7 @@ impl ConfigRom {
                 rom_overlay.dsprot_state().as_option(),
                 object_cache,
                 symbol_map,
+                ModuleKind::Overlay(overlay.id),
             )?;
 
             overlay_configs.push(OverlayConfig { info, signed: overlay.signed, file_name, dsprot });
@@ -378,6 +402,7 @@ impl ConfigRom {
                 overlay_signatures: overlay_signatures_symbol
                     .map(|s| (s.address() - arm9_section.address()) as u32)
                     .unwrap_or(0),
+                twl_autoload_infos: rom.arm9().offsets().twl_autoload_infos,
             },
             encrypted: rom.arm9().originally_encrypted(),
             compressed: rom.arm9().originally_compressed(),
@@ -390,6 +415,7 @@ impl ConfigRom {
                 rom.arm9().dsprot_state().as_option(),
                 object_cache,
                 symbol_map,
+                ModuleKind::Arm9,
             )?,
         };
 
@@ -457,11 +483,13 @@ fn create_dsprot_state(
     dsprot_info: Option<&DsProtDecryptResult>,
     object_cache: &ObjectCache,
     symbol_map: &SymbolMap,
+    module_kind: ModuleKind,
 ) -> Result<DsProtState> {
     let Some(dsprot_info) = dsprot_info else {
         return Ok(DsProtState::None);
     };
-    let bss_variable = symbol_map.by_name(DSPROT_BSS_SYMBOL_NAME)?.map(|(_, sym)| sym.addr);
+    let bss_variable =
+        symbol_map.by_name(&dsprot_bss_symbol_name(module_kind))?.map(|(_, sym)| sym.addr);
     let encrypted_ranges = symbol_map
         .functions()
         .map(|(func, sym)| {
