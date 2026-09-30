@@ -239,19 +239,24 @@ impl SymbolMap {
     }
 
     pub fn by_address(&self, address: u32) -> Result<Option<(SymbolId, &Symbol)>, SymbolMapError> {
-        let Some(mut symbols) = self.for_address(address) else {
+        let Some(symbols) = self.for_address(address) else {
             return Ok(None);
         };
-        let (id, symbol) = symbols.next().unwrap();
-        if let Some((_, other)) = symbols.next() {
-            return MultipleSymbolsSnafu {
-                address,
-                name: symbol.name.clone(),
-                other_name: other.name.clone(),
-            }
-            .fail();
+        let symbols: Vec<_> = symbols.collect();
+        if symbols.len() == 1 {
+            return Ok(Some(symbols[0]));
         }
-        Ok(Some((id, symbol)))
+        // Labels at the address of another symbol are second names for it, so that symbol is the one
+        let mut others = symbols.iter().filter(|(_, symbol)| !matches!(symbol.kind, SymbolKind::Label(_)));
+        if let (Some(&other), None) = (others.next(), others.next()) {
+            return Ok(Some(other));
+        }
+        MultipleSymbolsSnafu {
+            address,
+            name: symbols[0].1.name.clone(),
+            other_name: symbols[1].1.name.clone(),
+        }
+        .fail()
     }
 
     pub fn first_at_address(&self, address: u32) -> Option<(SymbolId, &Symbol)> {
