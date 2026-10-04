@@ -56,18 +56,15 @@ impl ConfigRom {
         let old_rom_paths_path = config_path.join(&config.rom_config);
         let rom_extract_dir = old_rom_paths_path.parent().unwrap();
 
-        let rom = Rom::load(
-            &old_rom_paths_path,
-            RomLoadOptions {
-                key: None,
-                compress: false,
-                encrypt: false,
-                load_files: false,
-                load_header: false,
-                load_banner: false,
-                load_multiboot_signature: false,
-            },
-        )?;
+        let rom = Rom::load(&old_rom_paths_path, RomLoadOptions {
+            key: None,
+            compress: false,
+            encrypt: false,
+            load_files: false,
+            load_header: false,
+            load_banner: false,
+            load_multiboot_signature: false,
+        })?;
 
         let mut rom_paths = rom.config().clone();
         let main_module_path = config_path.join(&config.main_module.object);
@@ -79,36 +76,27 @@ impl ConfigRom {
         let object = object::File::parse(&*file)?;
         let object_cache = ObjectCache::new(&object);
 
-        self.config_arm9(
-            &mut rom_paths,
-            ConfigArm9Options {
-                object_cache: &object_cache,
-                config: &config,
-                rom: &rom,
-                rom_paths_dir: new_rom_paths_dir,
-                symbol_map: symbol_maps.get_mut(ModuleKind::Arm9),
-            },
-        )?;
-        self.config_autoloads(
-            &mut rom_paths,
-            ConfigAutoloadsOptions {
-                object_cache: &object_cache,
-                config: &config,
-                rom: &rom,
-                rom_paths_dir: new_rom_paths_dir,
-            },
-        )?;
-        self.config_overlays(
-            &mut rom_paths,
-            ConfigOverlaysOptions {
-                object_cache: &object_cache,
-                config: &config,
-                rom: &rom,
-                rom_paths_dir: new_rom_paths_dir,
-                rom_extract_dir,
-                symbol_maps: &symbol_maps,
-            },
-        )?;
+        self.config_arm9(&mut rom_paths, ConfigArm9Options {
+            object_cache: &object_cache,
+            config: &config,
+            rom: &rom,
+            rom_paths_dir: new_rom_paths_dir,
+            symbol_map: symbol_maps.get_mut(ModuleKind::Arm9),
+        })?;
+        self.config_autoloads(&mut rom_paths, ConfigAutoloadsOptions {
+            object_cache: &object_cache,
+            config: &config,
+            rom: &rom,
+            rom_paths_dir: new_rom_paths_dir,
+        })?;
+        self.config_overlays(&mut rom_paths, ConfigOverlaysOptions {
+            object_cache: &object_cache,
+            config: &config,
+            rom: &rom,
+            rom_paths_dir: new_rom_paths_dir,
+            rom_extract_dir,
+            symbol_maps: &symbol_maps,
+        })?;
 
         serde_saphyr::to_io_writer(
             &mut create_file(new_rom_paths_dir.join("rom_config.yaml"))?,
@@ -374,7 +362,9 @@ impl ConfigRom {
                         .dsi
                         .as_mut()
                         .and_then(|dsi| dsi.ltd_autoloads.iter_mut().find(|a| a.index == index))
-                        .with_context(|| format!("Failed to find LTD autoload {index} in ROM config"))?;
+                        .with_context(|| {
+                            format!("Failed to find LTD autoload {index} in ROM config")
+                        })?;
                     autoload.files.bin = Self::make_path(binary_path, rom_paths_dir);
                     autoload.files.config = Self::make_path(yaml_path, rom_paths_dir);
                 }

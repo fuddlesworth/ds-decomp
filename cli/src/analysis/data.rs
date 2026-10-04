@@ -205,8 +205,14 @@ fn add_function_calls_as_relocations(
             });
             let module = RelocationModule::from_modules(candidates)?;
             if module == RelocationModule::None && *allow_unknown_function_calls {
-                insert_external_call_target(modules, *module_index, symbol_maps, address, called_function)?
-                    .map_or(module, |target| target.kind().into())
+                insert_external_call_target(
+                    modules,
+                    *module_index,
+                    symbol_maps,
+                    address,
+                    called_function,
+                )?
+                .map_or(module, |target| target.kind().into())
             } else {
                 module
             }

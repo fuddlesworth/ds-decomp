@@ -136,10 +136,11 @@ impl JumpTableStateArm {
                     ) if reg == index => {
                         let table_address = address + 8;
                         let size = (limit + 1) * 4;
-                        jump_tables.insert(
-                            table_address,
-                            JumpTable { address: table_address, size, kind: JumpTableKind::Arm },
-                        );
+                        jump_tables.insert(table_address, JumpTable {
+                            address: table_address,
+                            size,
+                            kind: JumpTableKind::Arm,
+                        });
                         Self::ValidJumpTable { table_address: address + 8, limit }
                     }
                     (
@@ -184,10 +185,11 @@ impl JumpTableStateArm {
                     ) if reg == index => {
                         let table_address = address + 8;
                         let size = (limit + 1) * 4;
-                        jump_tables.insert(
-                            table_address,
-                            JumpTable { address: table_address, size, kind: JumpTableKind::Arm },
-                        );
+                        jump_tables.insert(table_address, JumpTable {
+                            address: table_address,
+                            size,
+                            kind: JumpTableKind::Arm,
+                        });
                         Self::ValidJumpTable { table_address: address + 8, limit }
                     }
                     _ if ins.updates_condition_flags() => Self::default(),
@@ -206,10 +208,11 @@ impl JumpTableStateArm {
                     ) if reg == index => {
                         let table_address = address + 8;
                         let size = (limit + 1) * 4;
-                        jump_tables.insert(
-                            table_address,
-                            JumpTable { address: table_address, size, kind: JumpTableKind::Arm },
-                        );
+                        jump_tables.insert(table_address, JumpTable {
+                            address: table_address,
+                            size,
+                            kind: JumpTableKind::Arm,
+                        });
                         Self::ValidJumpTable { table_address: address + 8, limit }
                     }
                     _ if ins.updates_condition_flags() => Self::default(),
@@ -532,14 +535,11 @@ impl JumpTableStateThumb {
                     ) if reg == jump => {
                         let size = (limit + 1) * kind.item_size();
                         let jump = ThumbJumpTableJump::AddPc;
-                        jump_tables.insert(
-                            table_address,
-                            JumpTable {
-                                address: table_address,
-                                size,
-                                kind: JumpTableKind::Thumb { kind, jump },
-                            },
-                        );
+                        jump_tables.insert(table_address, JumpTable {
+                            address: table_address,
+                            size,
+                            kind: JumpTableKind::Thumb { kind, jump },
+                        });
                         Self::ValidJumpTable { table_address, limit, kind, jump }
                     }
                     (
@@ -557,14 +557,11 @@ impl JumpTableStateThumb {
                         let table_address = table_address - 2;
                         let size = (limit + 1) * kind.item_size();
                         let jump = ThumbJumpTableJump::Bx;
-                        jump_tables.insert(
-                            table_address,
-                            JumpTable {
-                                address: table_address,
-                                size,
-                                kind: JumpTableKind::Thumb { kind, jump },
-                            },
-                        );
+                        jump_tables.insert(table_address, JumpTable {
+                            address: table_address,
+                            size,
+                            kind: JumpTableKind::Thumb { kind, jump },
+                        });
                         Self::ValidJumpTable { table_address, limit, kind, jump }
                     }
                     _ => Self::default(),

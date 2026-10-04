@@ -90,7 +90,8 @@ impl Init {
             .iter()
             .map(|ov| Ok(Module::analyze_overlay(ov, &mut symbol_maps, &analysis_options)?))
             .collect::<Result<Vec<_>>>()?;
-        let ltd_autoloads = rom.dsi().and_then(|dsi| dsi.ltd()).map(|ltd| ltd.autoloads()).unwrap_or_default();
+        let ltd_autoloads =
+            rom.dsi().and_then(|dsi| dsi.ltd()).map(|ltd| ltd.autoloads()).unwrap_or_default();
         let autoloads = autoloads
             .iter()
             .chain(ltd_autoloads)
@@ -101,11 +102,13 @@ impl Init {
                 AutoloadKind::Dtcm => {
                     Ok(Module::analyze_dtcm(autoload, &mut symbol_maps, &analysis_options)?)
                 }
-                AutoloadKind::Unknown(_) | AutoloadKind::Ltd(_) => Ok(Module::analyze_unknown_autoload(
-                    autoload,
-                    &mut symbol_maps,
-                    &analysis_options,
-                )?),
+                AutoloadKind::Unknown(_) | AutoloadKind::Ltd(_) => {
+                    Ok(Module::analyze_unknown_autoload(
+                        autoload,
+                        &mut symbol_maps,
+                        &analysis_options,
+                    )?)
+                }
             })
             .collect::<Result<Vec<_>>>()?;
 

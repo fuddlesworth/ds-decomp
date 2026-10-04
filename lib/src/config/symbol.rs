@@ -247,7 +247,8 @@ impl SymbolMap {
             return Ok(Some(symbols[0]));
         }
         // Labels at the address of another symbol are second names for it, so that symbol is the one
-        let mut others = symbols.iter().filter(|(_, symbol)| !matches!(symbol.kind, SymbolKind::Label(_)));
+        let mut others =
+            symbols.iter().filter(|(_, symbol)| !matches!(symbol.kind, SymbolKind::Label(_)));
         if let (Some(&other), None) = (others.next(), others.next()) {
             return Ok(Some(other));
         }

@@ -42,7 +42,9 @@ impl RomExt for Rom<'_> {
                 let autoload = self
                     .dsi()
                     .and_then(|dsi| dsi.ltd())
-                    .and_then(|ltd| ltd.autoloads().iter().find(|a| ModuleKind::Autoload(a.kind()) == kind))
+                    .and_then(|ltd| {
+                        ltd.autoloads().iter().find(|a| ModuleKind::Autoload(a.kind()) == kind)
+                    })
                     .ok_or_else(|| RomGetCodeError::ModuleNotFound { module_kind: kind })?;
                 Ok(autoload.code().to_owned().into())
             }
