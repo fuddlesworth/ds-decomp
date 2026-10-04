@@ -3,6 +3,9 @@ name: Build
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 env:
   RUSTFLAGS: -D warnings
@@ -120,7 +123,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
-          draft: true
+          draft: false
           generate_release_notes: true
           fail_on_unmatched_files: true
 
