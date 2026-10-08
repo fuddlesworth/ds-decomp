@@ -13,10 +13,29 @@ pub fn is_valid_function_start_arm(ins: &Ins) -> bool {
     }
 }
 
-pub fn is_valid_function_start_thumb(ins: &Ins) -> bool {
-    if ins.is_data_operation()
-        && let Some(rn) = ins.rn()
-        && !matches!(rn, Reg::R0 | Reg::R1 | Reg::R2 | Reg::R3 | Reg::Sp | Reg::Pc)
+/// Returns the register number of the data operand of a Thumb data operation: the register after the destination in
+/// divided syntax (`rm` of `and rd, rm`, `rn` of `add rd, rn, #imm`), or `None` if that operand is an immediate or the
+/// instruction is no data operation. This is the operand that dsd checked with unarm 1.9. unarm 2.2's `Ins::rn` is
+/// the destination of a two-operand instruction instead, and the encoding tells the two-operand forms apart from the
+/// three-operand ones that have `rd == rn`, which the decoded instruction does not.
+fn thumb_data_operand(code: u16) -> Option<u16> {
+    match code {
+        // lsl/lsr/asr rd, rm, #imm; add/sub rd, rn, rm; add/sub rd, rn, #imm
+        0x0000..=0x1fff => Some((code >> 3) & 7),
+        // Data processing, except tst, cmp, cmn and mvn
+        0x4000..=0x43ff => match (code >> 6) & 0xf {
+            0x8 | 0xa | 0xb | 0xf => None,
+            _ => Some((code >> 3) & 7),
+        },
+        // add rd, rm with high registers
+        0x4400..=0x44ff => Some((code >> 3) & 0xf),
+        _ => None,
+    }
+}
+
+pub fn is_valid_function_start_thumb(ins: &Ins, code: u16) -> bool {
+    if let Some(reg) = thumb_data_operand(code)
+        && !matches!(reg, 0..=3 | 13 | 15)
     {
         // Data operand must be an argument register, SP or PC
         return false;
@@ -78,12 +97,13 @@ pub fn is_valid_function_start_thumb(ins: &Ins) -> bool {
     }
 }
 
-pub fn is_valid_function_start(ins: &Ins, thumb: bool) -> bool {
+/// `code` is the instruction's first halfword or word.
+pub fn is_valid_function_start(ins: &Ins, code: u32, thumb: bool) -> bool {
     if ins.is_conditional() {
         return false;
     }
     if thumb {
-        is_valid_function_start_thumb(ins)
+        is_valid_function_start_thumb(ins, code as u16)
     } else {
         is_valid_function_start_arm(ins)
     }

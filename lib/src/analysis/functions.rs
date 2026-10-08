@@ -268,7 +268,7 @@ impl Function {
             });
         };
         let ins_size = parser.pc() - address;
-        if !is_valid_function_start(&ins, thumb) {
+        if !is_valid_function_start(&ins, context.ins_code(address, ins_size), thumb) {
             return Err(FunctionAnalysisError::IntoFunction {
                 source: InvalidStartSnafu { address, ins }.build().into(),
             });
@@ -608,7 +608,11 @@ impl Function {
                             );
                             parser.set_pc(pointer_value);
                             let ins = parser.next().unwrap();
-                            if is_valid_function_start(&ins, thumb) {
+                            let mut code = [0; 4];
+                            let bytes = &module_code[offset..module_code.len().min(offset + 4)];
+                            code[..bytes.len()].copy_from_slice(bytes);
+                            let code = u32::from_le_bytes(code);
+                            if is_valid_function_start(&ins, code, thumb) {
                                 continue;
                             }
                         }
@@ -947,6 +951,15 @@ impl<'a> ParseFunctionContext<'a> {
         }
     }
 
+    fn ins_code(&self, address: u32, ins_size: u32) -> u32 {
+        let offset = (address - self.base_address) as usize;
+        match ins_size {
+            2 => u16::from_le_slice(&self.code[offset..]) as u32,
+            4 => u32::from_le_slice(&self.code[offset..]),
+            _ => 0,
+        }
+    }
+
     fn handle_ins_inner(
         &mut self,
         parser: &mut Parser,
@@ -975,14 +988,7 @@ impl<'a> ParseFunctionContext<'a> {
             self.jump_table_end_address = Some(table_end_address);
         }
 
-        let ins_code = {
-            let offset = (address - self.base_address) as usize;
-            match ins_size {
-                2 => u16::from_le_slice(&self.code[offset..]) as u32,
-                4 => u32::from_le_slice(&self.code[offset..]),
-                _ => 0,
-            }
-        };
+        let ins_code = self.ins_code(address, ins_size);
         if self.thumb && ins_size == 4 && !is_armv5_thumb_call(ins, ins_code) {
             return ParseFunctionState::IllegalIns {
                 address,
