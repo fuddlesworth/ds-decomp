@@ -150,11 +150,18 @@ impl FunctionExt for Function {
                         write!(w, "    ")?;
                     }
                     let pc_load_offset = if self.is_thumb() { 4 } else { 8 };
+                    let divided_thumb_code = (!ual && parser.mode() == ParseMode::Thumb)
+                        .then(|| {
+                            let offset = (address - base_address) as usize;
+                            module_code.get(offset..offset + 2).map(u16::from_le_slice)
+                        })
+                        .flatten();
                     let mut formatter = InsFormatter {
                         options: &unarm_options,
                         address,
                         pc: address + pc_load_offset,
                         lookup: symbols,
+                        divided_thumb_code,
                         w,
                     };
                     formatter.write_ins(&ins)?;
@@ -272,6 +279,8 @@ struct InsFormatter<'a, W: std::io::Write> {
     address: u32,
     pc: u32,
     lookup: &'a SymbolLookup<'a>,
+    /// The first halfword of a Thumb instruction written in divided (pre-UAL) syntax.
+    divided_thumb_code: Option<u16>,
     w: &'a mut W,
 }
 
@@ -284,6 +293,14 @@ impl<W: std::io::Write> std::fmt::Write for InsFormatter<'_, W> {
 impl<W: std::io::Write> FormatIns for InsFormatter<'_, W> {
     fn options(&self) -> &unarm::Options {
         self.options
+    }
+
+    fn write_ins(&mut self, ins: &Ins) -> core::fmt::Result {
+        ins.write_opcode(self)?;
+        match self.divided_thumb_code.and_then(|code| divided_thumb_params(ins, code)) {
+            Some(params) => params.write_params(self),
+            None => ins.write_params(self),
+        }
     }
 
     fn write_branch_target(&mut self, branch_target: BranchTarget) -> core::fmt::Result {
@@ -310,6 +327,32 @@ impl<W: std::io::Write> FormatIns for InsFormatter<'_, W> {
             _ => addr_ldr_str.write(self),
         }
     }
+}
+
+/// unarm 2.2 writes Thumb instructions in divided syntax with two operands whenever the destination is also the first
+/// source, and leaves out the `!` of an `ldmia` that loads its base register. mwasmarm and the original encoding need
+/// the three-operand form of the instructions that only have one (shifts by an immediate, `add`/`sub` with a register
+/// or a 3-bit immediate, and `sub sp`), and `!` on every Thumb `ldmia`, as unarm 1 wrote them. Returns the
+/// instruction to write the parameters of, if it differs from `ins`.
+fn divided_thumb_params(ins: &Ins, code: u16) -> Option<Ins> {
+    let three_operand_encoding = code < 0x2000 || (code & 0xff80) == 0xb080;
+    let mut params = ins.clone();
+    match &mut params {
+        Ins::Add { thumb, .. }
+        | Ins::Sub { thumb, .. }
+        | Ins::Lsl { thumb, .. }
+        | Ins::Lsr { thumb, .. }
+        | Ins::Asr { thumb, .. }
+            if *thumb && three_operand_encoding =>
+        {
+            *thumb = false;
+        }
+        Ins::Ldm { writeback, .. } if !*writeback && (code & 0xf800) == 0xc800 => {
+            *writeback = true;
+        }
+        _ => return None,
+    }
+    Some(params)
 }
 
 fn pc_relative_reference(ins: &Ins, address: u32, pc_load_offset: u32) -> Option<u32> {
