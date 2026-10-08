@@ -752,7 +752,7 @@ dependencies = [
 [[package]]
 name = "ds-rom"
 version = "0.8.0"
-source = "git+https://github.com/fuddlesworth/ds-rom?rev=3bdf6c84f02458719374b17ad0f305580fb5cca6#3bdf6c84f02458719374b17ad0f305580fb5cca6"
+source = "git+https://github.com/fuddlesworth/ds-rom?rev=c9ae6c030b14e37cc9c4048da016015e0b9aceef#c9ae6c030b14e37cc9c4048da016015e0b9aceef"
 dependencies = [
  "aes",
  "bitfield-struct",
