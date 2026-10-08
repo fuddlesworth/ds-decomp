@@ -252,6 +252,15 @@ impl SymbolMap {
         if let (Some(&other), None) = (others.next(), others.next()) {
             return Ok(Some(other));
         }
+        // When every symbol there is a label, such as a second entry point inside a function that was given a name
+        // beside the label analysis generated for it, the generated name is the one that yields
+        if symbols.iter().all(|(_, symbol)| matches!(symbol.kind, SymbolKind::Label(_))) {
+            let generated = Self::label_name(address);
+            let mut named = symbols.iter().filter(|(_, symbol)| symbol.name != generated);
+            if let (Some(&named), None) = (named.next(), named.next()) {
+                return Ok(Some(named));
+            }
+        }
         MultipleSymbolsSnafu {
             address,
             name: symbols[0].1.name.clone(),
@@ -260,8 +269,13 @@ impl SymbolMap {
         .fail()
     }
 
+    /// The first symbol at an address, passing over the label analysis generated there when the address has another
+    /// name, which is the one [`Self::by_address`] gives and so the one that is defined
     pub fn first_at_address(&self, address: u32) -> Option<(SymbolId, &Symbol)> {
-        self.for_address(address)?.next()
+        let generated = Self::label_name(address);
+        let mut symbols = self.for_address(address)?.peekable();
+        let first = *symbols.peek()?;
+        Some(symbols.find(|(_, symbol)| symbol.name != generated).unwrap_or(first))
     }
 
     pub fn for_name(
