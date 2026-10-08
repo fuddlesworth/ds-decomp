@@ -983,6 +983,13 @@ impl<'a> ParseFunctionContext<'a> {
                 _ => 0,
             }
         };
+        if self.thumb && ins_size == 4 && !is_armv5_thumb_call(ins, ins_code) {
+            return ParseFunctionState::IllegalIns {
+                address,
+                ins: ins.clone(),
+                reason: "second half of Thumb bl/blx is not one in ARMv5".into(),
+            };
+        }
         if self.thumb
             && let Some((label, second_label)) =
                 self.jump_table_state.get_labels(address, ins_code as u16)
@@ -1633,6 +1640,18 @@ pub struct PoolConstant {
 pub enum PoolConstantUsage {
     Call,
     Other,
+}
+
+/// unarm 2.2 decodes a 32-bit Thumb `bl`/`blx` by its Thumb-2 pattern, which ignores bit 13 of the second halfword, so
+/// a lone `bl` prefix followed by a `b` or an `stmia` comes out as a call. In ARMv5 the second halfword of `bl` starts
+/// with 0b11111 and that of `blx` with 0b11101. Returns false for a 32-bit call that is not one of those.
+fn is_armv5_thumb_call(ins: &Ins, ins_code: u32) -> bool {
+    let suffix = (ins_code >> 16) & 0xf800;
+    match ins {
+        Ins::Bl { .. } => suffix == 0xf800,
+        Ins::Blx { target: BlxTarget::Direct(_), .. } => suffix == 0xe800,
+        _ => true,
+    }
 }
 
 pub fn instruction_size(mode: ParseMode) -> u32 {
