@@ -63,7 +63,7 @@ impl JsonDelinks {
                 let object_to_link = base_path.join(&file_path).clean().with_extension("o");
                 let delink_file = delinks_path.join(&file_path).clean().with_extension("o");
 
-                Ok(DelinkFileJson { name: file.name.clone(), delink_file, object_to_link })
+                Ok(DelinkFileJson { name: file.unique_name(), delink_file, object_to_link })
             })
             .collect::<Result<Vec<_>>>()?;
 

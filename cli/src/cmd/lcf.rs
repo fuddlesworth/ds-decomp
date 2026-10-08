@@ -233,7 +233,8 @@ impl Lcf {
                 // Migrated files will have the same name as the original, that is intentional
                 continue;
             }
-            let filename = file.name.rsplit_once(['/', '\\']).unwrap_or(("", &file.name)).1;
+            let name = file.unique_name();
+            let filename = name.rsplit_once(['/', '\\']).map_or(name.as_str(), |(_, base)| base);
             match delink_files.entry(filename.to_string()) {
                 hash_map::Entry::Occupied(occupied_entry) => {
                     log::error!(

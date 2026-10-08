@@ -288,6 +288,14 @@ impl DelinkFile {
         (name, ext)
     }
 
+    /// The file name with the gap number of a gap file, which tells gap files apart.
+    pub fn unique_name(&self) -> String {
+        match self.split_file_ext() {
+            (name, "") => name,
+            (name, ext) => format!("{name}.{ext}"),
+        }
+    }
+
     pub fn gap(&self) -> bool {
         self.gap_id.is_some()
     }
