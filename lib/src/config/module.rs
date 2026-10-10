@@ -45,6 +45,7 @@ use crate::{
         symbol::{SymBss, Symbol, SymbolScope},
     },
     function,
+    util::bytes::FromSlice,
 };
 
 pub struct Module {
@@ -126,6 +127,14 @@ pub const BUILD_INFO_SYMBOL_NAME: &str = "BuildInfo";
 pub const AUTOLOAD_CALLBACK_SYMBOL_NAME: &str = "AutoloadCallback";
 pub const OVERLAY_SIGNATURES_SYMBOL_NAME: &str = "OverlaySignatures";
 pub const FIND_EXCEPTION_TABLE_SYMBOL_NAME: &str = "__FindExceptionTable";
+/// Section of the code after the LTD autoload's static initializer table. It calls into the ARM9 program through
+/// veneers, so it seems to be the TWL-only code of the ARM9 program's objects; the name is a guess.
+pub const LTDMAIN_SECTION: &str = ".ltdmain";
+
+/// Magic number of the COFF images of the DSi's Teak DSP.
+const TEAK_COFF_MAGIC: u16 = 0x00a4;
+const COFF_HEADER_SIZE: u32 = 20;
+const COFF_SYMBOL_SIZE: u32 = 18;
 
 pub struct OverlayModuleOptions<'a> {
     pub id: u16,
@@ -1255,11 +1264,24 @@ impl Module {
             panic!("Not an unknown autoload: {}", autoload.kind());
         };
         let code = autoload.code();
+        let code_end = base_address + code.len() as u32;
+
+        // In a TWL-SDK LTD autoload, the static initializer table that the autoload list points to is followed by a
+        // second code region, `.ltdmain`. The autoload's own objects come before the table, with their .rodata
+        // between it and their code.
+        let sinit_start = match autoload.kind() {
+            AutoloadKind::Ltd(_) => autoload.info().sinit_start.filter(|&sinit_start| {
+                sinit_start > base_address
+                    && self.static_initializers_end(sinit_start).is_some_and(|end| end <= code_end)
+            }),
+            _ => None,
+        };
 
         let (mut functions, mut text_end) = if let Some(mut functions_result) = self
             .find_functions(
                 symbol_map,
                 &FunctionSearchOptions {
+                    end_address: sinit_start,
                     max_function_start_search_distance: 32,
                     use_data_as_upper_bound: true,
                     // There are some handwritten assembly functions in unknown autoloads that don't follow the procedure call standard
@@ -1271,12 +1293,19 @@ impl Module {
             self.find_undiscovered_functions(
                 symbol_map,
                 &mut functions_result,
-                &FindUndiscoveredFunctionsOptions::default(),
+                &FindUndiscoveredFunctionsOptions {
+                    end_address: sinit_start,
+                    ..Default::default()
+                },
             )?;
             (functions_result.functions, functions_result.end)
         } else {
             (BTreeMap::new(), self.base_address)
         };
+
+        if let Some(sinit_start) = sinit_start {
+            return self.find_sections_ltd(symbol_map, functions, text_end, sinit_start, code_end);
+        }
 
         // Ensure __FindExceptionTable function is analyzed
         if let Some((find_fn, find_fn_addr, _, _)) =
@@ -1312,6 +1341,171 @@ impl Module {
         self.add_bss_section(bss_start)?;
 
         Ok(())
+    }
+
+    /// Adds the sections of a TWL-SDK LTD autoload: .text, .rodata, .ctor at `sinit_start`, then `.ltdmain` from the
+    /// next 32-byte boundary to its last function, .data and .bss.
+    fn find_sections_ltd(
+        &mut self,
+        symbol_map: &mut SymbolMap,
+        text_functions: BTreeMap<u32, Function>,
+        text_end: u32,
+        sinit_start: u32,
+        code_end: u32,
+    ) -> Result<(), ModuleError> {
+        let ctor_end = self
+            .static_initializers_end(sinit_start)
+            .expect("the LTD layout is only used for a static initializer table that ends");
+        let ctor_range = CtorRange { start: sinit_start, end: ctor_end };
+        let ltdmain_start = ctor_range.end.next_multiple_of(32).min(code_end);
+
+        let mut ltdmain = self
+            .find_functions(
+                symbol_map,
+                &FunctionSearchOptions {
+                    start_address: Some(ltdmain_start),
+                    max_function_start_search_distance: 64,
+                    // Its literal pools point to Thumb functions after it, which would end the search early
+                    use_data_as_upper_bound: false,
+                    check_defs_uses: false,
+                    existing_functions: Some(&text_functions),
+                    ..Default::default()
+                },
+                &self.default_func_prefix.clone(),
+            )?
+            .unwrap_or(FoundFunctions {
+                functions: BTreeMap::new(),
+                start: ltdmain_start,
+                end: ltdmain_start,
+            });
+
+        // Calls from .text into .ltdmain and back may lead to functions that neither search found
+        let mut all = FoundFunctions {
+            functions: text_functions.into_iter().chain(ltdmain.functions).collect(),
+            start: self.base_address,
+            end: ltdmain.end,
+        };
+        self.find_undiscovered_functions(
+            symbol_map,
+            &mut all,
+            &FindUndiscoveredFunctionsOptions::default(),
+        )?;
+        ltdmain.functions = all.functions.split_off(&ltdmain_start);
+        let text_functions = all.functions;
+        let text_end = text_functions
+            .values()
+            .map(|function| function.end_address().next_multiple_of(4))
+            .max()
+            .unwrap_or(text_end)
+            .max(text_end);
+        let ltdmain_end = ltdmain
+            .functions
+            .values()
+            .map(|function| function.end_address().next_multiple_of(4))
+            .max()
+            .unwrap_or(ltdmain_start);
+
+        if !text_functions.is_empty() {
+            self.add_text_section(FoundFunctions {
+                functions: text_functions,
+                start: self.base_address,
+                end: text_end,
+            })?;
+        }
+        self.add_rodata_section(text_end, sinit_start)?;
+        for (address, size) in self.find_dsp_images(text_end, sinit_start) {
+            // A byte array keeps the data analysis from taking the image's words for pointers
+            symbol_map.add_data(None, address, SymData::Byte { count: Some(size) })?;
+        }
+        if self.add_ctor_section(&ctor_range, symbol_map)?.is_some() {
+            log::warn!(
+                "The static initializers of {} are not analyzed, so they stay in .ltdmain instead of .init",
+                self.kind
+            );
+        }
+        if ltdmain_start < ltdmain_end {
+            self.sections.add(Section::new(SectionOptions {
+                name: LTDMAIN_SECTION.to_string(),
+                kind: SectionKind::Code,
+                start_address: ltdmain_start,
+                end_address: ltdmain_end,
+                alignment: 32,
+                functions: Some(ltdmain.functions),
+                comments: Comments::new(),
+            })?)?;
+        }
+        // .data follows .ltdmain directly, so it is only as aligned as its start address
+        if ltdmain_end < code_end {
+            self.sections.add(Section::new(SectionOptions {
+                name: ".data".to_string(),
+                kind: SectionKind::Data,
+                start_address: ltdmain_end,
+                end_address: code_end,
+                alignment: 1 << ltdmain_end.trailing_zeros().min(5),
+                functions: None,
+                comments: Comments::new(),
+            })?)?;
+        }
+        self.add_bss_section(code_end.next_multiple_of(32))?;
+
+        Ok(())
+    }
+
+    /// Returns the end of the static initializer table at `start`, after the zero that ends it.
+    fn static_initializers_end(&self, start: u32) -> Option<u32> {
+        let offset = start.checked_sub(self.base_address)? as usize;
+        let (words, _) = self.code.get(offset..)?.as_chunks::<4>();
+        let zero_index = words.iter().position(|word| *word == [0; 4])?;
+        Some(start + (zero_index as u32 + 1) * 4)
+    }
+
+    /// Finds the DSP binaries in `start..end`: consecutive COFF images of the DSi's Teak DSP, each aligned by 4.
+    /// Returns the address and size of each.
+    fn find_dsp_images(&self, start: u32, end: u32) -> Vec<(u32, u32)> {
+        let mut images = vec![];
+        let mut address = start.next_multiple_of(4);
+        while address + COFF_HEADER_SIZE <= end {
+            let header = &self.code[(address - self.base_address) as usize..];
+            let magic = u16::from_le_slice(header);
+            let symbol_table = u32::from_le_slice(&header[8..]);
+            let num_symbols = u32::from_le_slice(&header[12..]);
+            if magic != TEAK_COFF_MAGIC {
+                break;
+            }
+            // The string table follows the symbol table and starts with its own size
+            let Some(string_table) = num_symbols
+                .checked_mul(COFF_SYMBOL_SIZE)
+                .and_then(|size| size.checked_add(symbol_table))
+                .filter(|&offset| {
+                    offset >= COFF_HEADER_SIZE
+                        && offset
+                            .checked_add(4)
+                            .and_then(|size| address.checked_add(size))
+                            .is_some_and(|table_end| table_end <= end)
+                })
+            else {
+                break;
+            };
+            let string_table_size = u32::from_le_slice(
+                &self.code[(address + string_table - self.base_address) as usize..],
+            );
+            let Some(image_end) = (address + string_table)
+                .checked_add(string_table_size)
+                .filter(|&image_end| string_table_size >= 4 && image_end <= end)
+            else {
+                break;
+            };
+            images.push((address, image_end - address));
+            address = image_end.next_multiple_of(4);
+        }
+        if !images.is_empty() {
+            log::debug!(
+                "Found {} DSP images in {} from {start:#010x} to {address:#010x}",
+                images.len(),
+                self.kind
+            );
+        }
+        images
     }
 
     fn find_data_from_pools(

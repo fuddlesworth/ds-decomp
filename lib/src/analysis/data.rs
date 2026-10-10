@@ -158,7 +158,11 @@ pub fn find_local_data_from_section(
 
     let address_range = options.address_range.clone().unwrap_or(section.address_range());
 
+    let byte_arrays = symbol_map.byte_array_ranges(address_range.clone());
     for word in section.iter_words(code, Some(address_range.clone())) {
+        if byte_arrays.iter().any(|byte_array| byte_array.contains(&word.address)) {
+            continue;
+        }
         let pointer = word.value;
         if let Some(reloc_kind) = relocation_overrides.get(&pointer) {
             relocations.add(Relocation::new(RelocationOptions {

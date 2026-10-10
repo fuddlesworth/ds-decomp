@@ -100,7 +100,15 @@ fn find_external_references_in_sections(
         let code = section
             .code(o.modules[o.module_index].code(), o.modules[o.module_index].base_address())?
             .unwrap();
+        let byte_arrays = o
+            .symbol_maps
+            .get(o.modules[o.module_index].kind())
+            .map(|symbol_map| symbol_map.byte_array_ranges(section.address_range()))
+            .unwrap_or_default();
         for word in section.iter_words(code, None) {
+            if byte_arrays.iter().any(|byte_array| byte_array.contains(&word.address)) {
+                continue;
+            }
             find_external_data(o, word.address, word.value, result)?;
         }
     }
@@ -345,6 +353,14 @@ fn find_symbol_candidates(
             }
             let (section_index, section) = module.sections().get_by_contained_address(pointer)?;
             let symbol_map = options.symbol_maps.get(module.kind()).unwrap();
+            // Only the start of an embedded binary is referred to, so a value inside one is no pointer
+            let inside_byte_array = symbol_map
+                .byte_array_ranges(section.address_range())
+                .iter()
+                .any(|byte_array| pointer > byte_array.start && byte_array.contains(&pointer));
+            if inside_byte_array {
+                return None;
+            }
             // Functions can also end up outside code sections, such as unknown functions called from other modules
             let points_to_function = symbol_map.get_function(pointer).ok().flatten().is_some();
             if section.kind() == SectionKind::Code || points_to_function {

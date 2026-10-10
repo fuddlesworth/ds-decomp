@@ -238,6 +238,19 @@ impl SymbolMap {
         Some(self.symbols_by_address.get(&address)?.iter().map(|&id| (id, self.get(id).unwrap())))
     }
 
+    /// Returns the address ranges of the sized byte arrays in `range`, such as embedded binaries, whose words are not
+    /// pointers even when they look like addresses.
+    pub fn byte_array_ranges(&self, range: Range<u32>) -> Vec<Range<u32>> {
+        self.iter_by_address(range)
+            .filter_map(|(_, symbol)| match symbol.kind {
+                SymbolKind::Data(SymData::Byte { count: Some(count) }) => {
+                    Some(symbol.addr..symbol.addr + count)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     pub fn by_address(&self, address: u32) -> Result<Option<(SymbolId, &Symbol)>, SymbolMapError> {
         let Some(symbols) = self.for_address(address) else {
             return Ok(None);
