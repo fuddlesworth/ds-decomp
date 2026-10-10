@@ -1141,6 +1141,26 @@ impl<'a> ParseFunctionContext<'a> {
                     }
                 }
 
+                // A long-branch veneer's `ldr pc, [pc, #-0x4]` is followed by its target address, which belongs to it
+                if let Ins::Ldr {
+                    rd: Reg::Pc,
+                    addr: AddrLdrStr::Pre { rn: Reg::Pc, offset: LdrStrOffset::Imm(offset), .. },
+                    ..
+                } = ins
+                {
+                    let pool_address =
+                        ((address as i32 + offset) as u32 & !3) + if self.thumb { 4 } else { 8 };
+                    let start = pool_address.wrapping_sub(self.base_address) as usize;
+                    if let Some(bytes) = self.code.get(start..start + 4) {
+                        self.pool_constants.insert(pool_address, PoolConstant {
+                            address: pool_address,
+                            value: u32::from_le_slice(bytes),
+                            usage: PoolConstantUsage::Call,
+                        });
+                        self.last_pool_address = self.last_pool_address.max(Some(pool_address));
+                    }
+                }
+
                 // We're not inside a conditional code block, so this is the final return instruction
                 self.end_address = Some(end_address);
                 return ParseFunctionState::Done;
