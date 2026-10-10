@@ -399,13 +399,17 @@ impl Function {
             }
 
             // Skip if more than 8 consecutive valid pointer values, as that is most certainly not
-            // valid code at that point
+            // valid code at that point. Pointers into this module count too, as the DSi's LTD
+            // autoload lies above main memory.
             let mut function_code_iter = function_code;
             let mut pointer_count = 0;
             while function_code_iter.len() > 4 {
                 let word: u32 = u32::from_le_slice(function_code_iter);
                 function_code_iter = &function_code_iter[4..];
-                if (0x01ff8000..0x02400000).contains(&word) || word == 0 {
+                if (0x01ff8000..0x02400000).contains(&word)
+                    || (module_start_address..module_end_address).contains(&word)
+                    || word == 0
+                {
                     pointer_count += 1;
                 } else {
                     break;
