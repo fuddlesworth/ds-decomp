@@ -1075,7 +1075,10 @@ impl<'a> ParseFunctionContext<'a> {
                 };
             }
 
-            if !(0x01ff8000..0x03000000).contains(&destination) {
+            // Modules usually run from main memory or the TCMs, but some overlays run from VRAM
+            let in_module =
+                destination >= self.module_start_address && destination < self.module_end_address;
+            if !(0x01ff8000..0x03000000).contains(&destination) && !in_module {
                 // Branch goes outside of program
                 return ParseFunctionState::IllegalIns {
                     address,
