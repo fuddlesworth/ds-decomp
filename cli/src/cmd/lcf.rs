@@ -177,15 +177,30 @@ impl Lcf {
         let config_dir = self.config_path.parent().unwrap();
         let objects_file_path = lcf_path.join(ARM9_OBJECTS_FILE_NAME);
         let mut writer = BufWriter::new(create_file_and_dirs(objects_file_path)?);
-        for file in delinks_map.delink_files() {
-            let (file_path, _) = file.split_file_ext();
-            let base_path = if file.complete {
-                &config_dir.join(&config.build_path)
-            } else {
-                &config_dir.join(&config.delinks_path)
-            };
-            let file = base_path.join(file_path).with_extension("o").clean();
-            writeln!(writer, "\"{}\"", file.display())?;
+
+        // Each overlay's objects follow an -overlaygroup and -overlay option of their own, as the SDK's response
+        // file has them. mwldarm then gives every call out of range in an overlay its own long-branch veneer,
+        // placed after the calling function, instead of sharing one per target. A file listed after these options
+        // belongs to the last overlay, so the other modules' files come first.
+        let (overlays, others): (Vec<&Delinks>, Vec<&Delinks>) = delinks_map
+            .iter()
+            .partition(|delinks| matches!(delinks.module_kind(), ModuleKind::Overlay(_)));
+        for delinks in others.into_iter().chain(overlays) {
+            if let ModuleKind::Overlay(id) = delinks.module_kind() {
+                let name = format!("OV{id:03}");
+                writeln!(writer, "-overlaygroup {name},0")?;
+                writeln!(writer, "-overlay {name}")?;
+            }
+            for file in &delinks.files {
+                let (file_path, _) = file.split_file_ext();
+                let base_path = if file.complete {
+                    &config_dir.join(&config.build_path)
+                } else {
+                    &config_dir.join(&config.delinks_path)
+                };
+                let file = base_path.join(file_path).with_extension("o").clean();
+                writeln!(writer, "\"{}\"", file.display())?;
+            }
         }
         Ok(())
     }
