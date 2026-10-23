@@ -126,6 +126,9 @@ pub const MAIN_FN_SYMBOL_NAME: &str = "main";
 pub const BUILD_INFO_SYMBOL_NAME: &str = "BuildInfo";
 pub const AUTOLOAD_CALLBACK_SYMBOL_NAME: &str = "AutoloadCallback";
 pub const OVERLAY_SIGNATURES_SYMBOL_NAME: &str = "OverlaySignatures";
+/// NitroSDK's own name for the overlay digest table, which its linker script reserves in ARM9 main's .data and its
+/// tools fill in after the link
+pub const SDK_OVERLAY_DIGEST_SYMBOL_NAME: &str = "SDK_OVERLAY_DIGEST";
 pub const FIND_EXCEPTION_TABLE_SYMBOL_NAME: &str = "__FindExceptionTable";
 /// Section of the code after the LTD autoload's static initializer table. It calls into the ARM9 program through
 /// veneers, so it seems to be the TWL-only code of the ARM9 program's objects; the name is a guess.

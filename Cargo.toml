@@ -10,4 +10,4 @@ inherits = "release"
 lto = false
 
 [patch.crates-io]
-ds-rom = { git = "https://github.com/fuddlesworth/ds-rom", rev = "c9ae6c030b14e37cc9c4048da016015e0b9aceef" }
+ds-rom = { git = "https://github.com/fuddlesworth/ds-rom", rev = "66e83ef467b1e7a4816e667bf3b86572b1f8072d" }

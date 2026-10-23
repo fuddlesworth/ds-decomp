@@ -10,10 +10,15 @@ use ds_decomp::config::{
     module::ModuleKind,
 };
 
+use ds_rom::rom::{Arm9BuildConfig, RomConfig};
+
 use crate::{
     cmd::ModuleFilterArgs,
-    util::io::{FileError, read_file},
+    util::io::{FileError, open_file, read_file},
 };
+
+/// The size of an HMAC-SHA1 overlay digest
+const OVERLAY_DIGEST_SIZE: usize = 20;
 
 /// Verifies that built modules are matching the base ROM.
 #[derive(Args)]
@@ -44,14 +49,19 @@ impl CheckModules {
         let mut success = true;
 
         if self.module_filter.has(ModuleKind::Arm9) {
-            success &=
-                Self::print_check_module(&config.main_module, ModuleKind::Arm9, config_path)?;
+            success &= Self::print_check_module(
+                &config.main_module,
+                ModuleKind::Arm9,
+                Some(&config),
+                config_path,
+            )?;
         }
         for autoload in &config.autoloads {
             if self.module_filter.has(ModuleKind::Autoload(autoload.kind)) {
                 success &= Self::print_check_module(
                     &autoload.module,
                     ModuleKind::Autoload(autoload.kind),
+                    None,
                     config_path,
                 )?;
             }
@@ -61,6 +71,7 @@ impl CheckModules {
                 success &= Self::print_check_module(
                     &overlay.module,
                     ModuleKind::Overlay(overlay.id),
+                    None,
                     config_path,
                 )?;
             }
@@ -76,22 +87,30 @@ impl CheckModules {
     fn print_check_module(
         module: &ConfigModule,
         module_kind: ModuleKind,
+        arm9_config: Option<&Config>,
         config_path: &Path,
     ) -> Result<bool> {
-        let result = Self::check_module(module, config_path)?;
+        let result = Self::check_module(module, arm9_config, config_path)?;
         log::info!("Check {module_kind}: {result}");
         Ok(result == CheckResult::Ok)
     }
 
-    fn check_module(module: &ConfigModule, config_path: &Path) -> Result<CheckResult> {
+    fn check_module(
+        module: &ConfigModule,
+        arm9_config: Option<&Config>,
+        config_path: &Path,
+    ) -> Result<CheckResult> {
         let base_hash = u64::from_str_radix(&module.hash, 16)
             .with_context(|| format!("Invalid hash '{}'", module.hash))?;
 
-        let code = match read_file(config_path.join(&module.object)) {
+        let mut code = match read_file(config_path.join(&module.object)) {
             Ok(code) => code,
             Err(FileError::FileNotFound { .. }) => vec![],
             Err(e) => return Err(e.into()),
         };
+        if let Some(config) = arm9_config {
+            Self::take_overlay_digests(&mut code, config, config_path)?;
+        }
         let code_hash = fxhash::hash64(&code);
 
         if code_hash == base_hash {
@@ -99,6 +118,38 @@ impl CheckModules {
         } else {
             Ok(CheckResult::ChecksumFailed)
         }
+    }
+}
+
+impl CheckModules {
+    /// The linked ARM9 program leaves the room of the overlay digest table, which `rom build` fills in from the built
+    /// overlays as NitroSDK's tools do after the link, so its bytes are taken from the extracted ARM9 program: the
+    /// overlay table's digest just before the table and one digest per overlay. The ROM's own check covers them.
+    fn take_overlay_digests(code: &mut [u8], config: &Config, config_path: &Path) -> Result<()> {
+        let object_path = config_path.join(&config.main_module.object);
+        let Some(build_dir) = object_path.parent() else {
+            return Ok(());
+        };
+        let arm9_yaml = build_dir.join("arm9.yaml");
+        if !arm9_yaml.exists() {
+            return Ok(());
+        }
+        let build_config: Arm9BuildConfig = serde_saphyr::from_reader(open_file(&arm9_yaml)?)?;
+        let offset = build_config.offsets.overlay_signatures as usize;
+        if offset < OVERLAY_DIGEST_SIZE {
+            return Ok(());
+        }
+        let start = offset - OVERLAY_DIGEST_SIZE;
+        let end = offset + OVERLAY_DIGEST_SIZE * config.overlays.len();
+
+        let rom_config_path = config_path.join(&config.rom_config);
+        let rom_paths: RomConfig = serde_saphyr::from_reader(open_file(&rom_config_path)?)?;
+        let extract_dir = rom_config_path.parent().unwrap();
+        let original = read_file(extract_dir.join(&rom_paths.arm9_bin))?;
+        if end <= code.len() && end <= original.len() {
+            code[start..end].copy_from_slice(&original[start..end]);
+        }
+        Ok(())
     }
 }
 

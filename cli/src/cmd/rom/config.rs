@@ -10,7 +10,7 @@ use ds_decomp::config::{
     delinks::Delinks,
     module::{
         AUTOLOAD_CALLBACK_SYMBOL_NAME, BUILD_INFO_SYMBOL_NAME, ModuleKind,
-        OVERLAY_SIGNATURES_SYMBOL_NAME, dsprot_bss_symbol_name,
+        OVERLAY_SIGNATURES_SYMBOL_NAME, SDK_OVERLAY_DIGEST_SYMBOL_NAME, dsprot_bss_symbol_name,
     },
     section::{Section, Sections},
     symbol::{SymbolMap, SymbolMaps},
@@ -253,9 +253,16 @@ impl ConfigRom {
             None
         };
 
+        // When the build has a digest table, the overlay table's signature, which NitroSDK keeps just before it, is
+        // computed from the built table, as the SDK's tools do after the link
+        let signs_table = overlay_signatures_symbol(object_cache).is_some();
         let overlay_table_config = OverlayTableConfig {
-            table_signed: original_config.as_ref().is_some_and(|c| c.table_signed),
-            table_signature: original_config.map(|c| c.table_signature).unwrap_or_default(),
+            table_signed: signs_table || original_config.as_ref().is_some_and(|c| c.table_signed),
+            table_signature: if signs_table {
+                None
+            } else {
+                original_config.map(|c| c.table_signature).unwrap_or_default()
+            },
             overlays: overlay_configs,
         };
 
@@ -389,8 +396,7 @@ impl ConfigRom {
             .symbols_by_name
             .get(AUTOLOAD_CALLBACK_SYMBOL_NAME)
             .context("BuildInfo symbol not found")?;
-        let overlay_signatures_symbol =
-            object_cache.symbols_by_name.get(OVERLAY_SIGNATURES_SYMBOL_NAME);
+        let overlay_signatures_symbol = overlay_signatures_symbol(object_cache);
         let delinks =
             Delinks::from_file(config_path.join(&config.main_module.delinks), ModuleKind::Arm9)?;
         let bss_range = Self::section_ranges(&delinks.sections, "ARM9", object_cache, |s| {
@@ -482,6 +488,16 @@ struct ConfigOverlaysOptions<'a> {
     rom_paths_dir: &'a Path,
     rom_extract_dir: &'a Path,
     symbol_maps: &'a SymbolMaps,
+}
+
+/// The overlay digest table of the linked ARM9 program: dsd's name for it, or NitroSDK's.
+fn overlay_signatures_symbol<'a, 'data, 'file>(
+    object_cache: &'a ObjectCache<'data, 'file>,
+) -> Option<&'a object::Symbol<'data, 'file>> {
+    object_cache
+        .symbols_by_name
+        .get(OVERLAY_SIGNATURES_SYMBOL_NAME)
+        .or_else(|| object_cache.symbols_by_name.get(SDK_OVERLAY_DIGEST_SYMBOL_NAME))
 }
 
 fn create_dsprot_state(
