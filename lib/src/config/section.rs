@@ -295,15 +295,12 @@ impl Section {
         match migrate_section {
             None => {
                 let inherit_section = inherit_section.unwrap();
-                Ok(Section::inherit(
-                    inherit_section,
-                    SectionInheritOptions {
-                        start_address: start,
-                        end_address: end,
-                        comments: line.comments.clone(),
-                        migration: None,
-                    },
-                )
+                Ok(Section::inherit(inherit_section, SectionInheritOptions {
+                    start_address: start,
+                    end_address: end,
+                    comments: line.comments.clone(),
+                    migration: None,
+                })
                 .map_err(|error| SectionSnafu { context, error }.build())?)
             }
             Some(migrate_section) => Ok(Section::new(SectionOptions {

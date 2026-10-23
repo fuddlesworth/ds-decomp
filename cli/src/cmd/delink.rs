@@ -84,11 +84,10 @@ impl Delink {
         let config = Config::from_file(&self.config_path)?;
         let config_path = self.config_path.parent().unwrap();
 
-        let delinks_map = DelinksMap::from_config(
-            &config,
-            config_path,
-            DelinksMapOptions { migrate_sections: true, generate_gap_files: true },
-        )?;
+        let delinks_map = DelinksMap::from_config(&config, config_path, DelinksMapOptions {
+            migrate_sections: true,
+            generate_gap_files: true,
+        })?;
 
         let rom = config.load_rom(config_path)?;
 
@@ -561,15 +560,12 @@ impl<'a> DelinkObject<'a> {
             // Create relocation
             let r_type = relocation.kind().as_elf_relocation_type();
             let addend = relocation.addend();
-            self.object.add_relocation(
-                obj_section_id,
-                object::write::Relocation {
-                    offset: u64::from(offset),
-                    symbol: symbol_id,
-                    addend,
-                    flags: RelocationFlags::Elf { r_type },
-                },
-            )?;
+            self.object.add_relocation(obj_section_id, object::write::Relocation {
+                offset: u64::from(offset),
+                symbol: symbol_id,
+                addend,
+                flags: RelocationFlags::Elf { r_type },
+            })?;
         }
         Ok(error)
     }

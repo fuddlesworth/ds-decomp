@@ -408,11 +408,10 @@ fn apply_actions<'a>(
     config: &Config,
     config_path: &Path,
 ) -> Result<()> {
-    let mut delinks_map = DelinksMap::from_config(
-        config,
-        config_path,
-        DelinksMapOptions { migrate_sections: false, generate_gap_files: false },
-    )?;
+    let mut delinks_map = DelinksMap::from_config(config, config_path, DelinksMapOptions {
+        migrate_sections: false,
+        generate_gap_files: false,
+    })?;
     let mut symbol_maps = SymbolMaps::from_config(config_path, config)?;
     let mut relocations_map = RelocationsMap::from_config(config, config_path)?;
 

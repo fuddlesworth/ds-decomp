@@ -101,15 +101,11 @@ impl Lcf {
         let config = Config::from_file(&self.config_path)?;
         let config_dir = self.config_path.parent().unwrap();
 
-        let delinks_map = DelinksMap::from_config(
-            &config,
-            config_dir,
-            DelinksMapOptions {
-                // We want migrated sections to be linked in the module it belongs to
-                migrate_sections: true,
-                generate_gap_files: true,
-            },
-        )?;
+        let delinks_map = DelinksMap::from_config(&config, config_dir, DelinksMapOptions {
+            // We want migrated sections to be linked in the module it belongs to
+            migrate_sections: true,
+            generate_gap_files: true,
+        })?;
         Self::validate_all_file_names(&delinks_map)?;
 
         let rom = config.load_rom(config_dir)?;

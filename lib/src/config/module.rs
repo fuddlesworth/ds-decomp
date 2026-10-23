@@ -835,17 +835,16 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         let rodata_end = if let Some(init_functions) = self.add_ctor_section(&ctor, symbol_map)? {
-            if let Some((init_start, _)) = self.add_init_section(
-                symbol_map,
-                AddInitSectionOptions {
+            if let Some((init_start, _)) =
+                self.add_init_section(symbol_map, AddInitSectionOptions {
                     ctor: &ctor,
                     init_functions,
                     continuous: true,
                     overriden_function_sizes,
                     dsprot_encrypted_functions,
                     dsprot_encrypted_ranges,
-                },
-            )? {
+                })?
+            {
                 init_start
             } else {
                 ctor.start
@@ -915,26 +914,24 @@ impl Module {
             dsprot_result.map(|r| r.encrypted_ranges.as_slice()).unwrap_or(&[]);
 
         // .ctor and .init
-        let (read_only_end, rodata_start) =
-            if let Some(init_functions) = self.add_ctor_section(ctor, symbol_map)? {
-                if let Some(init_range) = self.add_init_section(
-                    symbol_map,
-                    AddInitSectionOptions {
-                        ctor,
-                        init_functions,
-                        continuous: false,
-                        overriden_function_sizes,
-                        dsprot_encrypted_functions,
-                        dsprot_encrypted_ranges,
-                    },
-                )? {
-                    (init_range.0, Some(init_range.1))
-                } else {
-                    (ctor.start, None)
-                }
+        let (read_only_end, rodata_start) = if let Some(init_functions) =
+            self.add_ctor_section(ctor, symbol_map)?
+        {
+            if let Some(init_range) = self.add_init_section(symbol_map, AddInitSectionOptions {
+                ctor,
+                init_functions,
+                continuous: false,
+                overriden_function_sizes,
+                dsprot_encrypted_functions,
+                dsprot_encrypted_ranges,
+            })? {
+                (init_range.0, Some(init_range.1))
             } else {
                 (ctor.start, None)
-            };
+            }
+        } else {
+            (ctor.start, None)
+        };
 
         // Secure area functions (software interrupts)
         let secure_area = &self.code[..0x800];
@@ -1670,11 +1667,8 @@ impl Module {
                     symbol_map.add_data(Some(symbol_name), relocation.to_address, SymData::Any)?;
                 }
                 SectionKind::Bss => {
-                    symbol_map.add_bss(
-                        Some(symbol_name),
-                        relocation.to_address,
-                        SymBss { size: None },
-                    )?;
+                    symbol_map
+                        .add_bss(Some(symbol_name), relocation.to_address, SymBss { size: None })?;
                 }
             }
             let reloc = self.relocations.add(Relocation::new(RelocationOptions {

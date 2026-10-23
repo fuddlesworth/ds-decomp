@@ -215,8 +215,12 @@ impl Function {
 
         let end_address = start_address + instruction_size(mode);
         let mut function_calls = FunctionCalls::new();
-        function_calls
-            .insert(address, CalledFunction { ins, ins_code, address: destination, thumb });
+        function_calls.insert(address, CalledFunction {
+            ins,
+            ins_code,
+            address: destination,
+            thumb,
+        });
         Some(Function {
             name: options.name.clone(),
             start_address,
@@ -1135,15 +1139,12 @@ impl<'a> ParseFunctionContext<'a> {
                         destination < self.start_address || destination >= end_address;
                     if outside_function {
                         // Tail call
-                        self.function_calls.insert(
-                            address,
-                            CalledFunction {
-                                ins: ins.clone(),
-                                ins_code,
-                                address: destination,
-                                thumb: self.thumb,
-                            },
-                        );
+                        self.function_calls.insert(address, CalledFunction {
+                            ins: ins.clone(),
+                            ins_code,
+                            address: destination,
+                            thumb: self.thumb,
+                        });
                     }
                 }
 
@@ -1158,14 +1159,11 @@ impl<'a> ParseFunctionContext<'a> {
                         ((address as i32 + offset) as u32 & !3) + if self.thumb { 4 } else { 8 };
                     let start = pool_address.wrapping_sub(self.base_address) as usize;
                     if let Some(bytes) = self.code.get(start..start + 4) {
-                        self.pool_constants.insert(
-                            pool_address,
-                            PoolConstant {
-                                address: pool_address,
-                                value: u32::from_le_slice(bytes),
-                                usage: PoolConstantUsage::Call,
-                            },
-                        );
+                        self.pool_constants.insert(pool_address, PoolConstant {
+                            address: pool_address,
+                            value: u32::from_le_slice(bytes),
+                            usage: PoolConstantUsage::Call,
+                        });
                         self.last_pool_address = self.last_pool_address.max(Some(pool_address));
                     }
                 }
@@ -1195,15 +1193,12 @@ impl<'a> ParseFunctionContext<'a> {
                 destination >= self.module_start_address && destination < self.module_end_address;
             if !in_current_module {
                 // Tail call
-                self.function_calls.insert(
-                    address,
-                    CalledFunction {
-                        ins: ins.clone(),
-                        ins_code,
-                        address: destination,
-                        thumb: self.thumb,
-                    },
-                );
+                self.function_calls.insert(address, CalledFunction {
+                    ins: ins.clone(),
+                    ins_code,
+                    address: destination,
+                    thumb: self.thumb,
+                });
             } else if self.function_branch_state.is_function_branch()
                 || self
                     .existing_functions
@@ -1217,15 +1212,12 @@ impl<'a> ParseFunctionContext<'a> {
                 } else {
                     // TODO: Always run this (move it outside of else block). SectionExt::relocatable_code must take condition
                     // code into account so the game matches after linking
-                    self.function_calls.insert(
-                        address,
-                        CalledFunction {
-                            ins: ins.clone(),
-                            ins_code,
-                            address: destination,
-                            thumb: self.thumb,
-                        },
-                    );
+                    self.function_calls.insert(address, CalledFunction {
+                        ins: ins.clone(),
+                        ins_code,
+                        address: destination,
+                        thumb: self.thumb,
+                    });
                 }
             } else {
                 // Normal branch instruction, insert a label
@@ -1259,14 +1251,11 @@ impl<'a> ParseFunctionContext<'a> {
             self.register_values[register as usize] =
                 Some((const_value, RegValueSrc::PoolConstant(pool_address)));
 
-            self.pool_constants.insert(
-                pool_address,
-                PoolConstant {
-                    address: pool_address,
-                    value: const_value,
-                    usage: PoolConstantUsage::Other,
-                },
-            );
+            self.pool_constants.insert(pool_address, PoolConstant {
+                address: pool_address,
+                value: const_value,
+                usage: PoolConstantUsage::Other,
+            });
             self.last_pool_address = self.last_pool_address.max(Some(pool_address));
         }
 
@@ -1704,14 +1693,11 @@ mod tests {
             .values()
             .map(|f| (f.start_address(), f.end_address(), f.is_thumb()))
             .collect();
-        assert_eq!(
-            found,
-            vec![
-                (0x020501d4, 0x020501e8, true),
-                (0x020501e8, 0x02050204, true),
-                (0x02050204, 0x02050208, true),
-            ]
-        );
+        assert_eq!(found, vec![
+            (0x020501d4, 0x020501e8, true),
+            (0x020501e8, 0x02050204, true),
+            (0x02050204, 0x02050208, true),
+        ]);
     }
 }
 
