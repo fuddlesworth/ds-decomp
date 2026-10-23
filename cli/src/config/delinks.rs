@@ -115,12 +115,15 @@ impl DelinksExt for Delinks {
                 let prev_section_end = prev_section_ends.get_mut(section.name()).unwrap();
                 if *prev_section_end < file_section.start_address() {
                     let mut gap = DelinkFile::new_gap(self.module_kind(), gap_files.len())?;
-                    gap.sections.add(Section::inherit(section, SectionInheritOptions {
-                        start_address: *prev_section_end,
-                        end_address: file_section.start_address(),
-                        comments: Comments::new(),
-                        migration: None,
-                    })?)?;
+                    gap.sections.add(Section::inherit(
+                        section,
+                        SectionInheritOptions {
+                            start_address: *prev_section_end,
+                            end_address: file_section.start_address(),
+                            comments: Comments::new(),
+                            migration: None,
+                        },
+                    )?)?;
                     gap_files.push(gap);
                 }
                 *prev_section_end = file_section.end_address();
@@ -132,12 +135,15 @@ impl DelinksExt for Delinks {
             let prev_section_end = *prev_section_ends.get(section.name()).unwrap();
             if prev_section_end < section.end_address() {
                 let mut gap = DelinkFile::new_gap(self.module_kind(), gap_files.len())?;
-                gap.sections.add(Section::inherit(section, SectionInheritOptions {
-                    start_address: prev_section_end,
-                    end_address: section.end_address(),
-                    comments: Comments::new(),
-                    migration: None,
-                })?)?;
+                gap.sections.add(Section::inherit(
+                    section,
+                    SectionInheritOptions {
+                        start_address: prev_section_end,
+                        end_address: section.end_address(),
+                        comments: Comments::new(),
+                        migration: None,
+                    },
+                )?)?;
                 gap_files.push(gap);
             }
         }
@@ -231,12 +237,15 @@ impl DelinksPrivExt for Delinks {
             address_range: Range<u32>,
             delink_file: &mut DelinkFile,
         ) -> Result<DelinkFile> {
-            let new_section = Section::inherit(section, SectionInheritOptions {
-                start_address: address_range.start,
-                end_address: address_range.end,
-                comments: Comments::new(),
-                migration: Some(migration),
-            })?;
+            let new_section = Section::inherit(
+                section,
+                SectionInheritOptions {
+                    start_address: address_range.start,
+                    end_address: address_range.end,
+                    comments: Comments::new(),
+                    migration: Some(migration),
+                },
+            )?;
             let new_sections = Sections::from_sections(vec![new_section])?;
             let new_file = DelinkFile::new(DelinkFileOptions {
                 name: delink_file.name.clone(),

@@ -53,10 +53,11 @@ impl CheckSymbols {
         let mut success = true;
 
         let symbol_maps = SymbolMaps::from_config(config_path, &config)?;
-        let delinks_map = DelinksMap::from_config(&config, config_path, DelinksMapOptions {
-            migrate_sections: false,
-            generate_gap_files: false,
-        })?;
+        let delinks_map = DelinksMap::from_config(
+            &config,
+            config_path,
+            DelinksMapOptions { migrate_sections: false, generate_gap_files: false },
+        )?;
         if self.module_filter.has(ModuleKind::Arm9)
             && let Some(target_symbols) = symbol_maps.get(ModuleKind::Arm9)
         {

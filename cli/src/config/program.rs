@@ -123,8 +123,11 @@ impl Program {
                                 symbol_map.add_data(Some(name), symbol.address, SymData::Any)?;
                             }
                             SectionKind::Bss => {
-                                symbol_map
-                                    .add_bss(Some(name), symbol.address, SymBss { size: None })?;
+                                symbol_map.add_bss(
+                                    Some(name),
+                                    symbol.address,
+                                    SymBss { size: None },
+                                )?;
                             }
                         }
                     }
