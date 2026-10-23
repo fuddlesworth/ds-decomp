@@ -9,7 +9,6 @@ use ds_decomp::config::{
     config::{Config, ConfigModule},
     module::ModuleKind,
 };
-
 use ds_rom::rom::{Arm9BuildConfig, RomConfig};
 
 use crate::{
