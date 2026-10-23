@@ -33,6 +33,11 @@ pub struct Lcf {
     /// Path to config.yaml.
     #[arg(long, short = 'c')]
     pub config_path: PathBuf,
+
+    /// File of absolute symbols to define in the linker script, as NitroSDK's linker script template defines its
+    /// stack sizes: one `NAME = VALUE` per line, with `#` comments.
+    #[arg(long)]
+    pub symbols: Option<PathBuf>,
 }
 
 static ARM9_LCF_TEMPLATE: &str = include_str!("../../../assets/arm9.lcf.template");
@@ -117,7 +122,10 @@ impl Lcf {
         let mut tt = TinyTemplate::new();
         tt.add_template("arm9", ARM9_LCF_TEMPLATE)?;
 
-        let variables = Self::generate_lcf_variables(&config);
+        let mut variables = Self::generate_lcf_variables(&config);
+        if let Some(symbols) = &self.symbols {
+            variables.extend(Self::read_symbols(symbols)?);
+        }
         let arm9_context = Arm9LcfContext {
             modules: link_modules.modules,
             overlays: config
@@ -155,6 +163,27 @@ impl Lcf {
                 Some(LcfVariable::new(var.to_string(), value))
             })
             .collect()
+    }
+
+    fn read_symbols(path: &Path) -> Result<Vec<LcfVariable>> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read symbols from {}", path.display()))?;
+        let mut symbols = vec![];
+        for (number, line) in text.lines().enumerate() {
+            let line = line.split('#').next().unwrap().trim();
+            if line.is_empty() {
+                continue;
+            }
+            let Some((symbol, value)) = line.split_once('=') else {
+                bail!("{}:{}: expected NAME = VALUE", path.display(), number + 1);
+            };
+            let (symbol, value) = (symbol.trim(), value.trim());
+            if symbol.is_empty() || value.is_empty() || symbol.contains(char::is_whitespace) {
+                bail!("{}:{}: expected NAME = VALUE", path.display(), number + 1);
+            }
+            symbols.push(LcfVariable::new(symbol, value));
+        }
+        Ok(symbols)
     }
 
     fn write_arm9_lcf(context: &Arm9LcfContext, tt: &TinyTemplate, lcf_path: &Path) -> Result<()> {
