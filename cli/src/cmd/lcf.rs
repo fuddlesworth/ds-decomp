@@ -8,7 +8,11 @@ use std::{
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use ds_decomp::config::{
-    config::Config, delinks::Delinks, link_time_const::LinkTimeConst, module::ModuleKind,
+    config::Config,
+    delinks::{DelinkFile, Delinks},
+    link_time_const::LinkTimeConst,
+    module::ModuleKind,
+    section::MigrateSection,
 };
 use ds_rom::rom::{Autoload, Rom, raw::AutoloadKind};
 use serde::Serialize;
@@ -207,6 +211,23 @@ impl Lcf {
         let objects_file_path = lcf_path.join(ARM9_OBJECTS_FILE_NAME);
         let mut writer = BufWriter::new(create_file_and_dirs(objects_file_path)?);
 
+        let build_path = config_dir.join(&config.build_path);
+        let delinks_path = config_dir.join(&config.delinks_path);
+        for line in Self::arm9_object_lines(&build_path, &delinks_path, delinks_map) {
+            writeln!(writer, "{line}")?;
+        }
+        Ok(())
+    }
+
+    /// The lines of the ARM9 program's object list: complete files' objects from `build_path`, the others' from
+    /// `delinks_path`.
+    fn arm9_object_lines(
+        build_path: &Path,
+        delinks_path: &Path,
+        delinks_map: &DelinksMap,
+    ) -> Vec<String> {
+        let mut lines = vec![];
+
         // Each overlay's objects follow an -overlaygroup and -overlay option of their own, as the SDK's response
         // file has them. mwldarm then gives every call out of range in an overlay its own long-branch veneer,
         // placed after the calling function, instead of sharing one per target. A file listed after these options
@@ -217,21 +238,30 @@ impl Lcf {
         for delinks in others.into_iter().chain(overlays) {
             if let ModuleKind::Overlay(id) = delinks.module_kind() {
                 let name = format!("OV{id:03}");
-                writeln!(writer, "-overlaygroup {name},0")?;
-                writeln!(writer, "-overlay {name}")?;
+                lines.push(format!("-overlaygroup {name},0"));
+                lines.push(format!("-overlay {name}"));
             }
             for file in &delinks.files {
+                if Self::links_in_ltd(file, delinks.module_kind()) {
+                    // Listed by its migrated part, in the LTD autoload's files
+                    continue;
+                }
                 let (file_path, _) = file.split_file_ext();
-                let base_path = if file.complete {
-                    &config_dir.join(&config.build_path)
-                } else {
-                    &config_dir.join(&config.delinks_path)
-                };
+                let base_path = if file.complete { build_path } else { delinks_path };
                 let file = base_path.join(file_path).with_extension("o").clean();
-                writeln!(writer, "\"{}\"", file.display())?;
+                lines.push(format!("\"{}\"", file.display()));
             }
         }
-        Ok(())
+        lines
+    }
+
+    /// Whether a file of `module_kind` has sections migrated to the DSi LTD autoload. TwlSDK's response file lists such
+    /// an object once, where its LTD part belongs: mwldarm makes the long-branch veneers of the LTD code object by
+    /// object, in the list's order, so listing it in its own module's place changes the LTD autoload.
+    fn links_in_ltd(file: &DelinkFile, module_kind: ModuleKind) -> bool {
+        file.migrated_sections.iter().any(|section| {
+            matches!(MigrateSection::parse(section.name(), module_kind), Ok(Some(migration)) if migration.is_ltd())
+        })
     }
 
     pub fn overlay_id_symbol_name(id: u16) -> String {
@@ -490,5 +520,180 @@ impl LinkModules {
 
     fn last_static_module(&self) -> &LcfModule {
         &self.modules[self.last_static_index]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_decomp::config::section::LTD_MAIN_AUTOLOAD_INDEX;
+
+    use super::*;
+
+    const LTD_MAIN: ModuleKind = ModuleKind::Autoload(AutoloadKind::Ltd(LTD_MAIN_AUTOLOAD_INDEX));
+
+    // An object with functions and statics in ARM9 main and in the LTD autoload, as TwlSDK's card_rom.o has
+    const MAIN_DELINKS: &str = "
+    .text       start:0x02000000 end:0x02000100 kind:code align:32
+    .bss        start:0x02100000 end:0x02100100 kind:bss align:32
+
+main_a.c:
+    complete
+    .text       start:0x02000000 end:0x02000040
+    .bss        start:0x02100000 end:0x02100010
+    .ltdmain.bss start:0x02780020 end:0x02780030
+
+card_rom.c:
+    complete
+    .text       start:0x02000040 end:0x02000080
+    .bss        start:0x02100010 end:0x02100020
+    .ltdmain    start:0x02700040 end:0x02700070
+    .ltdmain.bss start:0x02780010 end:0x02780020
+
+main_b.c:
+    .text       start:0x02000080 end:0x02000100
+    .bss        start:0x02100020 end:0x02100100
+";
+
+    const LTD_DELINKS: &str = "
+    .ltdmain    start:0x02700000 end:0x02700100 kind:code align:32
+    .bss        start:0x02780000 end:0x02780100 kind:bss align:32
+
+ltd_a.c:
+    complete
+    .ltdmain    start:0x02700000 end:0x02700040
+    .bss        start:0x02780000 end:0x02780010
+
+ltd_b.c:
+    complete
+    .ltdmain    start:0x02700080 end:0x02700100
+    .bss        start:0x02780030 end:0x02780100
+";
+
+    fn delinks_map(name: &str, migrate_sections: bool) -> DelinksMap {
+        let dir = std::env::temp_dir().join(format!("dsd-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let main_path = dir.join("main_delinks.txt");
+        let ltd_path = dir.join("ltd_delinks.txt");
+        std::fs::write(&main_path, MAIN_DELINKS).unwrap();
+        std::fs::write(&ltd_path, LTD_DELINKS).unwrap();
+        let delinks = vec![
+            Delinks::from_file(&main_path, ModuleKind::Arm9).unwrap(),
+            Delinks::from_file(&ltd_path, LTD_MAIN).unwrap(),
+        ];
+        std::fs::remove_dir_all(&dir).unwrap();
+        DelinksMap::new(delinks, DelinksMapOptions { migrate_sections, generate_gap_files: true })
+            .unwrap()
+    }
+
+    fn files_named<'a>(delinks: &'a Delinks, name: &str) -> Vec<&'a DelinkFile> {
+        delinks.files.iter().filter(|file| file.name == name).collect()
+    }
+
+    fn section_names(file: &DelinkFile) -> Vec<(String, String)> {
+        file.sections
+            .iter()
+            .map(|section| (section.name().to_string(), section.source_name().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn test_ltd_part_migrates_as_one_file() {
+        let map = delinks_map("migrate", true);
+
+        let main = map.get(ModuleKind::Arm9).unwrap();
+        let [card_rom] = files_named(main, "card_rom.c")[..] else { panic!() };
+        assert_eq!(section_names(card_rom), [
+            (".text".to_string(), ".text".to_string()),
+            (".bss".to_string(), ".bss".to_string())
+        ]);
+        let migrated =
+            card_rom.migrated_sections.iter().map(|section| section.name()).collect::<Vec<_>>();
+        assert_eq!(migrated, [".ltdmain", ".ltdmain.bss"]);
+        assert!(Lcf::links_in_ltd(card_rom, ModuleKind::Arm9));
+
+        // The LTD autoload gets one file with both parts, placed from the object's own section names, and its own
+        // .ltdmain files are not migrations
+        let ltd = map.get(LTD_MAIN).unwrap();
+        let [card_rom] = files_named(ltd, "card_rom.c")[..] else { panic!() };
+        assert!(card_rom.migrated());
+        assert_eq!(section_names(card_rom), [
+            (".ltdmain".to_string(), ".ltdmain".to_string()),
+            (".bss".to_string(), ".ltdmain.bss".to_string())
+        ]);
+        for name in ["ltd_a.c", "ltd_b.c"] {
+            let [file] = files_named(ltd, name)[..] else { panic!("{name}") };
+            assert!(!file.migrated());
+            assert_eq!(file.migrated_sections.len(), 0);
+            assert!(!Lcf::links_in_ltd(file, LTD_MAIN));
+        }
+        // main_a.c's statics come after card_rom.c's in the LTD autoload, though its code is first in main
+        let order = ltd
+            .files
+            .iter()
+            .filter(|file| !file.gap())
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(order, ["ltd_a.c", "card_rom.c", "main_a.c", "ltd_b.c"]);
+    }
+
+    /// A gap file's name and its sections' names and ranges
+    type Gap = (String, Vec<(String, u32, u32)>);
+
+    fn gaps(delinks: &Delinks) -> Vec<Gap> {
+        delinks
+            .files
+            .iter()
+            .filter(|file| file.gap())
+            .map(|file| {
+                let sections = file
+                    .sections
+                    .iter()
+                    .map(|s| (s.name().to_string(), s.start_address(), s.end_address()))
+                    .collect();
+                (file.unique_name(), sections)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_ltd_part_object_listed_in_ltd_place() {
+        let map = delinks_map("objects", true);
+        let build = Path::new("build");
+        let delinks = Path::new("delinks");
+        let lines = Lcf::arm9_object_lines(build, delinks, &map)
+            .into_iter()
+            .filter(|line| !line.contains("_dsd_gap@"))
+            .collect::<Vec<_>>();
+        let object = |base: &Path, name: &str| format!("\"{}\"", base.join(name).display());
+        // Each object with an LTD part is listed once, in the LTD autoload's order
+        assert_eq!(lines, [
+            object(delinks, "main_b.o"),
+            object(build, "ltd_a.o"),
+            object(build, "card_rom.o"),
+            object(build, "main_a.o"),
+            object(build, "ltd_b.o"),
+        ]);
+    }
+
+    #[test]
+    fn test_ltd_part_unmigrated() {
+        // Without migration, as objdiff and the disassembler read the delinks, the file keeps its LTD part. The LTD
+        // parts' order, opposite to main's for main_a.c and card_rom.c, is no link order cycle of main
+        let map = delinks_map("unmigrated", false);
+        let main = map.get(ModuleKind::Arm9).unwrap();
+        let [card_rom] = files_named(main, "card_rom.c")[..] else { panic!() };
+        let names = section_names(card_rom).into_iter().map(|(name, _)| name).collect::<Vec<_>>();
+        assert_eq!(names, [".text", ".bss", ".ltdmain", ".ltdmain.bss"]);
+        assert!(files_named(map.get(LTD_MAIN).unwrap(), "card_rom.c").is_empty());
+
+        // Its gap files are still those that `dsd delink` writes from the migrated delinks: the LTD part is no gap
+        let migrated = delinks_map("unmigrated-gaps", true);
+        for kind in [ModuleKind::Arm9, LTD_MAIN] {
+            assert_eq!(gaps(map.get(kind).unwrap()), gaps(migrated.get(kind).unwrap()));
+        }
+        assert_eq!(gaps(map.get(LTD_MAIN).unwrap()), [(
+            "_dsd_gap@ltd_autoload_0_0".to_string(),
+            vec![(".ltdmain".to_string(), 0x02700070, 0x02700080)]
+        )]);
     }
 }

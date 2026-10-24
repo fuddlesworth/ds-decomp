@@ -19,6 +19,7 @@ use crate::{
     util::io::{FileError, create_file},
 };
 
+#[derive(Clone)]
 pub struct Delinks {
     pub sections: Sections,
     pub global_categories: Categories,

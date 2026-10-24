@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeMap, btree_map},
     fs::{File, create_dir_all},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -9,8 +10,8 @@ use clap::Args;
 use ds_decomp::config::{
     config::Config,
     delinks::{DelinkFile, Delinks},
-    module::Module,
-    section::{Section, SectionKind},
+    module::{Module, ModuleKind},
+    section::{MigrateSection, Section, SectionKind},
     symbol::{InstructionMode, Symbol, SymbolKind, SymbolMaps},
 };
 use ds_rom::rom::Rom;
@@ -79,12 +80,30 @@ impl Disassemble {
     ) -> Result<()> {
         let config_path = self.config_path.parent().unwrap();
 
-        let module = config.load_module(config_path, symbol_maps, delinks.module_kind(), rom)?;
+        let module_kind = delinks.module_kind();
+        let mut modules = BTreeMap::new();
+        modules
+            .insert(module_kind, config.load_module(config_path, symbol_maps, module_kind, rom)?);
+        // A section migrated to another module, such as a main file's `.ltdmain`, is disassembled from that module
+        for file in &delinks.files {
+            for section in file.sections.iter() {
+                if let Some(migration) = MigrateSection::parse(section.name(), module_kind)?
+                    && let btree_map::Entry::Vacant(entry) = modules.entry(migration.module_kind())
+                {
+                    entry.insert(config.load_module(
+                        config_path,
+                        symbol_maps,
+                        migration.module_kind(),
+                        rom,
+                    )?);
+                }
+            }
+        }
 
         for file in &delinks.files {
             let (file_path, _) = file.split_file_ext();
             let out_path = self.asm_path.join(file_path).with_extension("s");
-            self.create_assembly_file(&module, file, out_path, symbol_maps)?;
+            self.create_assembly_file(module_kind, &modules, file, out_path, symbol_maps)?;
         }
 
         Ok(())
@@ -92,7 +111,8 @@ impl Disassemble {
 
     fn create_assembly_file<P: AsRef<Path>>(
         &self,
-        module: &Module,
+        module_kind: ModuleKind,
+        modules: &BTreeMap<ModuleKind, Module>,
         delink_file: &DelinkFile,
         path: P,
         symbol_maps: &SymbolMaps,
@@ -103,14 +123,15 @@ impl Disassemble {
         let asm_file = create_file(path)?;
         let mut writer = BufWriter::new(asm_file);
 
-        self.disassemble(module, delink_file, &mut writer, symbol_maps)?;
+        self.disassemble(module_kind, modules, delink_file, &mut writer, symbol_maps)?;
 
         Ok(())
     }
 
     fn disassemble(
         &self,
-        module: &Module,
+        module_kind: ModuleKind,
+        modules: &BTreeMap<ModuleKind, Module>,
         delink_file: &DelinkFile,
         writer: &mut BufWriter<File>,
         symbol_maps: &SymbolMaps,
@@ -122,14 +143,17 @@ impl Disassemble {
         writeln!(writer, "    .include \"macros/function.inc\"")?;
         writeln!(writer)?;
 
-        let symbol_map = symbol_maps.get(module.kind()).unwrap();
-
         for section in delink_file.sections.sorted_by_address() {
             // write section directive
             match section.name() {
                 ".text" => writeln!(writer, "    .text")?,
                 _ => writeln!(writer, "    .section {}, 4, 1, 4", section.name())?,
             }
+
+            let section_module_kind = MigrateSection::parse(section.name(), module_kind)?
+                .map_or(module_kind, |migration| migration.module_kind());
+            let module = &modules[&section_module_kind];
+            let symbol_map = symbol_maps.get(module.kind()).unwrap();
 
             let code = section.code_from_module(module)?;
             let mut offset = 0; // offset within section

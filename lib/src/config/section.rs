@@ -470,7 +470,7 @@ impl Display for DisplaySectionInherited<'_> {
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum MigrateSection {
     Dtcm,
     Itcm,
@@ -478,6 +478,11 @@ pub enum MigrateSection {
     AutoloadBss(u32),
     Exception,
     Exceptix,
+    /// Code and data of an ARM9 main object that TwlSDK's `#pragma section LTDMAIN` puts in the DSi LTD autoload's
+    /// `.ltdmain`, so that one object has functions in both modules
+    LtdMain,
+    /// Statics of the object's LTDMAIN part, which its linker script places in the LTD autoload's `.bss`
+    LtdBss,
 }
 
 const DTCM_SECTION: &str = ".dtcm";
@@ -486,6 +491,11 @@ const AUTOLOAD_DATA_SECTION_PREFIX: &str = ".autodata_";
 const AUTOLOAD_BSS_SECTION_PREFIX: &str = ".autobss_";
 const EXCEPTION_SECTION: &str = ".exception";
 const EXCEPTIX_SECTION: &str = ".exceptix";
+/// The section names that MWCC gives an LTDMAIN part's code and statics, as TwlSDK's linker script places them
+const LTD_MAIN_SECTION: &str = ".ltdmain";
+const LTD_BSS_SECTION: &str = ".ltdmain.bss";
+/// TwlSDK's LTDMAIN is the first autoload of the ARM9i program
+pub const LTD_MAIN_AUTOLOAD_INDEX: u32 = 0;
 
 #[derive(Debug, Snafu)]
 pub enum MigrateSectionError {
@@ -500,6 +510,9 @@ impl MigrateSection {
             ITCM_SECTION => Ok(Some(Self::Itcm)),
             EXCEPTION_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exception)),
             EXCEPTIX_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exceptix)),
+            // The LTD autoload's own sections have these names, so they migrate only from other modules
+            LTD_MAIN_SECTION if !Self::LtdMain.is_target(src_module) => Ok(Some(Self::LtdMain)),
+            LTD_BSS_SECTION if !Self::LtdBss.is_target(src_module) => Ok(Some(Self::LtdBss)),
             _ => {
                 if let Some(index) = name.strip_prefix(AUTOLOAD_DATA_SECTION_PREFIX) {
                     let index: u32 = index.parse().map_err(|error| {
@@ -530,6 +543,8 @@ impl MigrateSection {
             }
             MigrateSection::Exception => EXCEPTION_SECTION.into(),
             MigrateSection::Exceptix => EXCEPTIX_SECTION.into(),
+            MigrateSection::LtdMain => LTD_MAIN_SECTION.into(),
+            MigrateSection::LtdBss => LTD_BSS_SECTION.into(),
         }
     }
 
@@ -541,7 +556,19 @@ impl MigrateSection {
             MigrateSection::AutoloadBss(_) => ".bss",
             MigrateSection::Exception => EXCEPTION_SECTION,
             MigrateSection::Exceptix => EXCEPTIX_SECTION,
+            MigrateSection::LtdMain => LTD_MAIN_SECTION,
+            MigrateSection::LtdBss => ".bss",
         }
+    }
+
+    /// Whether this migration moves a section into the DSi LTD autoload. The ARM9i program is loaded apart from the
+    /// ARM9 program, so an object with such a section is linked once, in the LTD autoload's place of the link order.
+    pub fn is_ltd(&self) -> bool {
+        matches!(self, MigrateSection::LtdMain | MigrateSection::LtdBss)
+    }
+
+    fn is_target(&self, module_kind: ModuleKind) -> bool {
+        self.module_kind() == module_kind
     }
 
     pub fn sections_to_migrate(module_kind: ModuleKind) -> Vec<MigrateSection> {
@@ -553,7 +580,10 @@ impl MigrateSection {
             ModuleKind::Autoload(AutoloadKind::Unknown(index)) => {
                 vec![MigrateSection::AutoloadData(index), MigrateSection::AutoloadBss(index)]
             }
-            // The LTD module is loaded separately from the ARM9 program, so its sections stay in it
+            // Only the LTDMAIN autoload takes sections of other modules' objects
+            ModuleKind::Autoload(AutoloadKind::Ltd(LTD_MAIN_AUTOLOAD_INDEX)) => {
+                vec![MigrateSection::LtdMain, MigrateSection::LtdBss]
+            }
             ModuleKind::Autoload(AutoloadKind::Ltd(_)) => vec![],
         }
     }
@@ -566,6 +596,8 @@ impl MigrateSection {
             MigrateSection::AutoloadBss(_) => SectionKind::Bss,
             MigrateSection::Exception => SectionKind::Rodata,
             MigrateSection::Exceptix => SectionKind::Rodata,
+            MigrateSection::LtdMain => SectionKind::Code,
+            MigrateSection::LtdBss => SectionKind::Bss,
         }
     }
 
@@ -578,6 +610,9 @@ impl MigrateSection {
             }
             MigrateSection::Exception => ModuleKind::Arm9,
             MigrateSection::Exceptix => ModuleKind::Arm9,
+            MigrateSection::LtdMain | MigrateSection::LtdBss => {
+                ModuleKind::Autoload(AutoloadKind::Ltd(LTD_MAIN_AUTOLOAD_INDEX))
+            }
         }
     }
 }
@@ -816,4 +851,73 @@ impl IntoIterator for Sections {
 pub struct Word {
     pub address: u32,
     pub value: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LTD_MAIN: ModuleKind = ModuleKind::Autoload(AutoloadKind::Ltd(LTD_MAIN_AUTOLOAD_INDEX));
+
+    fn parse(name: &str, src_module: ModuleKind) -> Option<MigrateSection> {
+        MigrateSection::parse(name, src_module).unwrap()
+    }
+
+    #[test]
+    fn test_parse_existing_migrations() {
+        assert_eq!(parse(".itcm", ModuleKind::Arm9), Some(MigrateSection::Itcm));
+        assert_eq!(parse(".dtcm", ModuleKind::Arm9), Some(MigrateSection::Dtcm));
+        assert_eq!(parse(".autodata_2", ModuleKind::Arm9), Some(MigrateSection::AutoloadData(2)));
+        assert_eq!(parse(".autobss_3", ModuleKind::Arm9), Some(MigrateSection::AutoloadBss(3)));
+        assert_eq!(parse(".exception", ModuleKind::Arm9), None);
+        assert_eq!(parse(".exception", ModuleKind::Overlay(1)), Some(MigrateSection::Exception));
+        assert_eq!(parse(".text", ModuleKind::Arm9), None);
+        assert!(MigrateSection::parse(".autobss_x", ModuleKind::Arm9).is_err());
+    }
+
+    #[test]
+    fn test_parse_ltd_migrations() {
+        // A main or overlay file's LTDMAIN part migrates to the LTD autoload
+        assert_eq!(parse(".ltdmain", ModuleKind::Arm9), Some(MigrateSection::LtdMain));
+        assert_eq!(parse(".ltdmain.bss", ModuleKind::Arm9), Some(MigrateSection::LtdBss));
+        assert_eq!(parse(".ltdmain", ModuleKind::Overlay(0)), Some(MigrateSection::LtdMain));
+        // The LTD autoload's own sections are not migrations
+        assert_eq!(parse(".ltdmain", LTD_MAIN), None);
+        assert_eq!(parse(".ltdmain.bss", LTD_MAIN), None);
+        assert_eq!(parse(".bss", LTD_MAIN), None);
+    }
+
+    #[test]
+    fn test_ltd_migration_targets() {
+        let main = MigrateSection::LtdMain;
+        assert_eq!(main.source_name(), ".ltdmain");
+        assert_eq!(main.target_name(), ".ltdmain");
+        assert_eq!(main.module_kind(), LTD_MAIN);
+        assert!(main.section_kind() == SectionKind::Code);
+        assert!(main.is_ltd());
+
+        // MWCC names the part's statics .ltdmain.bss, which TwlSDK's linker script places in the LTD autoload's .bss
+        let bss = MigrateSection::LtdBss;
+        assert_eq!(bss.source_name(), ".ltdmain.bss");
+        assert_eq!(bss.target_name(), ".bss");
+        assert_eq!(bss.module_kind(), LTD_MAIN);
+        assert!(bss.section_kind() == SectionKind::Bss);
+        assert!(bss.is_ltd());
+
+        assert!(!MigrateSection::Itcm.is_ltd());
+        assert!(!MigrateSection::AutoloadBss(2).is_ltd());
+    }
+
+    #[test]
+    fn test_sections_to_migrate_ltd() {
+        assert_eq!(MigrateSection::sections_to_migrate(LTD_MAIN), vec![
+            MigrateSection::LtdMain,
+            MigrateSection::LtdBss
+        ]);
+        assert!(
+            MigrateSection::sections_to_migrate(ModuleKind::Autoload(AutoloadKind::Ltd(1)))
+                .is_empty()
+        );
+        assert!(MigrateSection::sections_to_migrate(ModuleKind::Arm9).is_empty());
+    }
 }

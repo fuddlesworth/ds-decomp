@@ -134,7 +134,7 @@ fn test_roundtrip() -> Result<()> {
         // Generate LCF
         log::info!("Running dsd lcf...");
         let build_path = dsd_config_yaml.parent().unwrap().join(dsd_config.build_path);
-        let lcf = Lcf { config_path: dsd_config_yaml.clone() };
+        let lcf = Lcf { config_path: dsd_config_yaml.clone(), symbols: None };
         lcf.run()?;
 
         // Run linker

@@ -147,7 +147,8 @@ impl<'a> Delinker<'a> {
                 continue;
             }
 
-            for section in file.sections.iter() {
+            // The sections migrated to other modules are delinked into this file's object too
+            for section in file.sections.iter().chain(file.migrated_sections.iter()) {
                 let module = self.program.by_module_kind(delinks.module_kind()).unwrap();
                 let (symbol_map, section_end) = if let Some(migrate_section) =
                     MigrateSection::parse(section.name(), delinks.module_kind())?
@@ -157,6 +158,18 @@ impl<'a> Delinker<'a> {
                         ModuleKind::Overlay(id) => {
                             self.rom.arm7_overlays()[id as usize].end_address()
                         }
+                        // The ARM9i program's autoloads are not in the ARM9 program's autoload table
+                        ModuleKind::Autoload(AutoloadKind::Ltd(index)) => self
+                            .rom
+                            .dsi()
+                            .and_then(|dsi| dsi.ltd())
+                            .and_then(|ltd| {
+                                ltd.autoloads().iter().find_map(|a| {
+                                    (a.kind() == AutoloadKind::Ltd(index))
+                                        .then_some(a.end_address())
+                                })
+                            })
+                            .context("Failed to find end address of LTD autoload")?,
                         ModuleKind::Autoload(autoload_kind) => self
                             .rom
                             .arm9()

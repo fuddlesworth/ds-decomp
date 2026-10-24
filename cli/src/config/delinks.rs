@@ -24,6 +24,7 @@ where
     fn generate_gap_files(&mut self) -> Result<()>;
 }
 trait DelinksPrivExt {
+    fn sort_files_keep_gap_ids(&mut self) -> Result<()>;
     fn validate_files(&self) -> Result<()>;
     fn migrate_section(
         &mut self,
@@ -34,55 +35,7 @@ trait DelinksPrivExt {
 
 impl DelinksExt for Delinks {
     fn sort_files(&mut self) -> Result<()> {
-        // Make lists of delink indices for each section, sorted by start address for that section
-        let mut files_sorted_by_section: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-        for (i, file) in self.files.iter().enumerate() {
-            for section in file.sections.iter() {
-                files_sorted_by_section.entry(section.name()).or_default().push(i);
-            }
-        }
-        for (section_name, files) in files_sorted_by_section.iter_mut() {
-            files.sort_unstable_by_key(|&i| {
-                self.files[i].sections.by_name(section_name).unwrap().1.start_address()
-            });
-        }
-
-        // Create edges in link order graph between adjacent delinks
-        let mut graph = vec![Vec::new(); self.files.len()];
-        for files in files_sorted_by_section.values() {
-            for pair in files.windows(2) {
-                graph[pair[0]].push(pair[1]);
-            }
-        }
-
-        // Compute link order
-        match toposort(&graph) {
-            Ok(sorted) => {
-                // Sort delinks by their position in the link order
-                let mut sorted_files = vec![DelinkFile::default(); sorted.len()];
-                for (pos, index) in sorted.into_iter().enumerate() {
-                    sorted_files[pos] = std::mem::take(&mut self.files[index]);
-                }
-                self.files = sorted_files;
-            }
-            Err(cycle) => {
-                // Print link order cycle
-                let first = cycle[0];
-                let cycle = cycle.into_iter().map(|i| &self.files[i].name).fold(
-                    String::new(),
-                    |mut acc, name| {
-                        acc.push_str(name);
-                        acc.push_str(" -> ");
-                        acc
-                    },
-                );
-                bail!(
-                    "Link order cycle detected while sorting delink files: {}{}",
-                    cycle,
-                    self.files[first].name
-                )
-            }
-        };
+        self.sort_files_keep_gap_ids()?;
 
         // Stabilize gap IDs
         let mut next_gap_id = 0;
@@ -164,6 +117,67 @@ impl DelinksExt for Delinks {
 }
 
 impl DelinksPrivExt for Delinks {
+    /// Sorts the files in link order, keeping the gap files' numbers.
+    fn sort_files_keep_gap_ids(&mut self) -> Result<()> {
+        // Make lists of delink indices for each section, sorted by start address for that section
+        let mut files_sorted_by_section: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        let module_kind = self.module_kind();
+        for (i, file) in self.files.iter().enumerate() {
+            for section in file.sections.iter() {
+                // A section to migrate is linked in another module's order, such as a main file's `.ltdmain` in the
+                // LTD autoload's, so it says nothing of this module's
+                if matches!(MigrateSection::parse(section.name(), module_kind), Ok(Some(_))) {
+                    continue;
+                }
+                files_sorted_by_section.entry(section.name()).or_default().push(i);
+            }
+        }
+        for (section_name, files) in files_sorted_by_section.iter_mut() {
+            files.sort_unstable_by_key(|&i| {
+                self.files[i].sections.by_name(section_name).unwrap().1.start_address()
+            });
+        }
+
+        // Create edges in link order graph between adjacent delinks
+        let mut graph = vec![Vec::new(); self.files.len()];
+        for files in files_sorted_by_section.values() {
+            for pair in files.windows(2) {
+                graph[pair[0]].push(pair[1]);
+            }
+        }
+
+        // Compute link order
+        match toposort(&graph) {
+            Ok(sorted) => {
+                // Sort delinks by their position in the link order
+                let mut sorted_files = vec![DelinkFile::default(); sorted.len()];
+                for (pos, index) in sorted.into_iter().enumerate() {
+                    sorted_files[pos] = std::mem::take(&mut self.files[index]);
+                }
+                self.files = sorted_files;
+            }
+            Err(cycle) => {
+                // Print link order cycle
+                let first = cycle[0];
+                let cycle = cycle.into_iter().map(|i| &self.files[i].name).fold(
+                    String::new(),
+                    |mut acc, name| {
+                        acc.push_str(name);
+                        acc.push_str(" -> ");
+                        acc
+                    },
+                );
+                bail!(
+                    "Link order cycle detected while sorting delink files: {}{}",
+                    cycle,
+                    self.files[first].name
+                )
+            }
+        };
+
+        Ok(())
+    }
+
     /// Checks that adjacent files do not overlap and that their sections are in ascending order. Assumes that the files list
     /// is already sorted using [`Self::sort_files`].
     fn validate_files(&self) -> Result<()> {
@@ -317,24 +331,49 @@ impl DelinksMap {
         options: DelinksMapOptions,
     ) -> Result<DelinksMap> {
         let path = path.as_ref();
-        let map = config
+        let delinks = config
             .iter_modules()
-            .map(|(kind, config)| {
-                let delinks = Delinks::from_file(path.join(&config.delinks), kind)?;
-                Ok((kind, delinks))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
+            .map(|(kind, config)| Ok(Delinks::from_file(path.join(&config.delinks), kind)?))
+            .collect::<Result<Vec<_>>>()?;
+        Self::new(delinks, options)
+    }
+
+    /// Makes a map of each module's delinks, which must be of distinct modules.
+    pub fn new(delinks: Vec<Delinks>, options: DelinksMapOptions) -> Result<DelinksMap> {
+        let mut map = BTreeMap::new();
+        for delinks in delinks {
+            let kind = delinks.module_kind();
+            if map.insert(kind, delinks).is_some() {
+                bail!("Delinks of module {kind} given twice");
+            }
+        }
         let mut map = DelinksMap { map };
 
         if options.migrate_sections {
             map.migrate_sections()?;
-        }
-        if options.generate_gap_files {
-            for delinks in map.map.values_mut() {
-                delinks.generate_gap_files()?;
+            if options.generate_gap_files {
+                map.generate_gap_files()?;
+            }
+        } else if options.generate_gap_files {
+            // The gaps are those that `dsd delink` writes and `dsd lcf` links, of the migrated delinks: a section that
+            // another module's file migrates in is no gap of its module
+            let mut migrated = DelinksMap { map: map.map.clone() };
+            migrated.migrate_sections()?;
+            migrated.generate_gap_files()?;
+            for (kind, delinks) in &mut map.map {
+                let gaps = migrated.map[kind].files.iter().filter(|file| file.gap()).cloned();
+                delinks.files.extend(gaps);
+                delinks.sort_files_keep_gap_ids()?;
             }
         }
         Ok(map)
+    }
+
+    fn generate_gap_files(&mut self) -> Result<()> {
+        for delinks in self.map.values_mut() {
+            delinks.generate_gap_files()?;
+        }
+        Ok(())
     }
 
     fn migrate_sections(&mut self) -> Result<()> {
@@ -345,8 +384,21 @@ impl DelinksMap {
                 let source_name = migrate_section.source_name();
                 let target_name = migrate_section.target_name();
 
-                let has_migration = modules.iter().any(|source_module| {
-                    let source = self.map.get_mut(source_module).unwrap();
+                // A section of the source name is migrated only from the modules where it means this migration:
+                // the LTD autoload's own sections are named `.ltdmain` too
+                let source_modules = modules
+                    .iter()
+                    .copied()
+                    .filter(|&source_module| {
+                        matches!(
+                            MigrateSection::parse(&source_name, source_module),
+                            Ok(Some(migration)) if migration == migrate_section
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let has_migration = source_modules.iter().any(|source_module| {
+                    let source = self.map.get(source_module).unwrap();
                     source.files.iter().any(|file| file.sections.by_name(&source_name).is_some())
                 });
                 if !has_migration {
@@ -366,12 +418,27 @@ impl DelinksMap {
                     section.clone()
                 };
 
-                for source_module in &modules {
+                for source_module in &source_modules {
                     let source = self.map.get_mut(source_module).unwrap();
                     let files = source.migrate_section(&section, migrate_section)?;
 
                     let target = self.map.get_mut(target_module).unwrap();
-                    target.files.extend(files);
+                    for file in files {
+                        // A file with several sections migrated to one module, such as code and statics, stays one
+                        // file there, so that it has one place in the module's link order
+                        let existing = target
+                            .files
+                            .iter_mut()
+                            .find(|existing| existing.migrated() && existing.name == file.name);
+                        match existing {
+                            Some(existing) => {
+                                for section in file.sections {
+                                    existing.sections.add(section)?;
+                                }
+                            }
+                            None => target.files.push(file),
+                        }
+                    }
                 }
             }
         }
