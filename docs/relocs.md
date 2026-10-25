@@ -30,6 +30,15 @@ from:FROM kind:KIND to:TO add:ADD module:MODULE
     - `ARM9_CTOR_START`: Base address of .ctor in main ARM9 program.
     - `__exception_table_start__`: Base address of .exceptix in main ARM9 program.
     - `__exception_table_end__`: End address of .exceptix in main ARM9 program.
+    - The module parameters' symbols, which NitroSDK's crt0 keeps in `_start_ModuleParams` and TwlSDK's in
+      `_start_LtdModuleParams`. `dsd lcf` defines them after the modules, from the modules' section symbols, as
+      NitroSDK's linker script template does, and `rom build` writes the same values again:
+        - `SDK_AUTOLOAD_START`: End of the main ARM9 program's initialized data, where its autoload blocks start.
+        - `SDK_AUTOLOAD_LIST`, `SDK_AUTOLOAD_LIST_END`: The autoload list, after the autoload blocks.
+        - `SDK_STATIC_BSS_START`, `SDK_STATIC_BSS_END`: The main ARM9 program's .bss.
+        - `SDK_LTDAUTOLOAD_START`: Where the DSi LTD module's autoload blocks start, after the ARM9i program's static
+          part. Defined only for a ROM with an LTD module, as the next two.
+        - `SDK_LTDAUTOLOAD_LIST`, `SDK_LTDAUTOLOAD_LIST_END`: The LTD module's autoload list, after its blocks.
 
 ### Destination module
 - `none`: No destination symbol found due to poor analysis by `dsd init`. Many `dsd` subcommands will fail.

@@ -1,5 +1,6 @@
 use std::{
     fmt::Display,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -9,7 +10,7 @@ use ds_decomp::config::{
     config::{Config, ConfigModule},
     module::ModuleKind,
 };
-use ds_rom::rom::{Arm9BuildConfig, RomConfig};
+use ds_rom::rom::{Arm9BuildConfig, DsiConfig, LtdModuleParams, RomConfig};
 
 use crate::{
     cmd::ModuleFilterArgs,
@@ -109,6 +110,7 @@ impl CheckModules {
         };
         if let Some(config) = arm9_config {
             Self::take_overlay_digests(&mut code, config, config_path)?;
+            Self::take_ltd_compressed_end(&mut code, config, config_path)?;
         }
         let code_hash = fxhash::hash64(&code);
 
@@ -149,6 +151,74 @@ impl CheckModules {
             code[start..end].copy_from_slice(&original[start..end]);
         }
         Ok(())
+    }
+
+    /// The end of the compressed LTD module in the LTD module's parameters, which TwlSDK's crt0 leaves zero, is known
+    /// only once `rom build` has compressed the ARM9i program, and it writes it then, as TwlSDK's compressor does after
+    /// the link. Its word is taken from the extracted ARM9 program, which keeps the original's, and the ROM's own check
+    /// covers it.
+    fn take_ltd_compressed_end(code: &mut [u8], config: &Config, config_path: &Path) -> Result<()> {
+        let rom_config_path = config_path.join(&config.rom_config);
+        let rom_paths: RomConfig = serde_saphyr::from_reader(open_file(&rom_config_path)?)?;
+        let Some(dsi_paths) = &rom_paths.dsi else {
+            return Ok(());
+        };
+        let extract_dir = rom_config_path.parent().unwrap();
+        let dsi_config: DsiConfig =
+            serde_saphyr::from_reader(open_file(extract_dir.join(&dsi_paths.config))?)?;
+        let Some(range) = Self::ltd_compressed_end_range(&dsi_config) else {
+            return Ok(());
+        };
+        let original = read_file(extract_dir.join(&rom_paths.arm9_bin))?;
+        if range.end <= code.len() && range.end <= original.len() {
+            code[range.clone()].copy_from_slice(&original[range]);
+        }
+        Ok(())
+    }
+
+    /// Where the ARM9 program keeps the end of the compressed LTD module, if the ARM9i program is compressed.
+    fn ltd_compressed_end_range(dsi_config: &DsiConfig) -> Option<Range<usize>> {
+        if !dsi_config.ltd.is_some_and(|ltd| ltd.compressed) {
+            return None;
+        }
+        let start = dsi_config.arm9i.build_info as usize
+            + std::mem::offset_of!(LtdModuleParams, compressed_static_end);
+        Some(start..start + size_of::<u32>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ds_rom::rom::{DsiProgram, LtdConfig};
+
+    use super::*;
+
+    fn dsi_config(ltd: Option<LtdConfig>) -> DsiConfig {
+        let program =
+            DsiProgram { base_address: 0x02400000, entry: 0, build_info: 0xf7c, modcrypt_size: 0 };
+        DsiConfig {
+            arm9i: program,
+            arm7i: program,
+            digest_sector_size: 0x400,
+            digest_sector_count: 0x20,
+            secure_area: None,
+            ltd,
+        }
+    }
+
+    #[test]
+    fn test_ltd_compressed_end_in_ltd_params() {
+        // The fourth word of the LTD module's parameters
+        let config = dsi_config(Some(LtdConfig { compressed: true }));
+        assert_eq!(CheckModules::ltd_compressed_end_range(&config), Some(0xf88..0xf8c));
+        // An uncompressed LTD module keeps a zero there, as the link leaves it
+        assert_eq!(
+            CheckModules::ltd_compressed_end_range(&dsi_config(Some(LtdConfig {
+                compressed: false
+            }))),
+            None
+        );
+        assert_eq!(CheckModules::ltd_compressed_end_range(&dsi_config(None)), None);
     }
 }
 

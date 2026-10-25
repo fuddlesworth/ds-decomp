@@ -44,4 +44,7 @@ SECTIONS \{
     } > {module.name}
 
     {{ endfor }}
+    {{ for variable in module_params -}}
+    {variable.symbol} = {variable.value};
+    {{ endfor }}
 }

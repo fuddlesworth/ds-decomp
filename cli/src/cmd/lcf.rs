@@ -60,6 +60,8 @@ struct LcfModule {
     object: String,
     sections: Vec<LcfSection>,
     in_tcm: bool,
+    #[serde(skip)]
+    kind: ModuleKind,
 }
 
 #[derive(Serialize, Clone)]
@@ -72,6 +74,8 @@ struct LcfSection {
     append_zero: bool,
     exceptix: bool,
     files: Vec<LcfFile>,
+    #[serde(skip)]
+    initialized: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -86,6 +90,25 @@ struct Arm9LcfContext {
     modules: Vec<LcfModule>,
     overlays: Vec<Arm9LcfOverlay>,
     variables: Vec<LcfVariable>,
+    /// Symbols of the module parameters, defined after the modules from their sections' symbols
+    module_params: Vec<LcfVariable>,
+}
+
+/// What the module parameters' symbols take from the ROM rather than from the link: the sizes of the autoload lists,
+/// which the ROM build writes after each module's autoload blocks, and the place of the LTD module's autoload blocks.
+struct ModuleParamsLayout {
+    /// Size of the static module's autoload list
+    autoload_list_size: u32,
+    /// The LTD module's layout, if the ROM has one
+    ltd: Option<LtdParamsLayout>,
+}
+
+struct LtdParamsLayout {
+    /// Where the LTD module's autoload blocks start: the ARM9i program's base address plus the size of its static part,
+    /// which isn't linked
+    autoload_start: u32,
+    /// Size of the LTD module's autoload list
+    autoload_list_size: u32,
 }
 
 #[derive(Serialize)]
@@ -132,6 +155,8 @@ impl Lcf {
         if let Some(symbols) = &self.symbols {
             variables.extend(Self::read_symbols(symbols)?);
         }
+        let module_params =
+            Self::module_param_variables(&link_modules.modules, &ModuleParamsLayout::new(&rom)?);
         let arm9_context = Arm9LcfContext {
             modules: link_modules.modules,
             overlays: config
@@ -143,6 +168,7 @@ impl Lcf {
                 })
                 .collect(),
             variables,
+            module_params,
         };
         Self::write_arm9_lcf(&arm9_context, &tt, &build_path)?;
         self.write_arm9_objects(&config, &build_path, &delinks_map, &link_names)?;
@@ -165,10 +191,78 @@ impl Lcf {
                     LinkTimeConst::Arm9CtorStart => return None, // ARM9_CTOR_START already exists
                     LinkTimeConst::ExceptionTableStart => return None, // __exception_table_start__
                     LinkTimeConst::ExceptionTableEnd => return None, // __exception_table_end__
+                    // Defined after the modules, see module_param_variables
+                    LinkTimeConst::SdkAutoloadList
+                    | LinkTimeConst::SdkAutoloadListEnd
+                    | LinkTimeConst::SdkAutoloadStart
+                    | LinkTimeConst::SdkStaticBssStart
+                    | LinkTimeConst::SdkStaticBssEnd
+                    | LinkTimeConst::SdkLtdautoloadList
+                    | LinkTimeConst::SdkLtdautoloadListEnd
+                    | LinkTimeConst::SdkLtdautoloadStart => return None,
                 };
                 Some(LcfVariable::new(var.to_string(), value))
             })
             .collect()
+    }
+
+    /// The symbols of the module parameters that NitroSDK's crt0 keeps for the ROM's startup (`_start_ModuleParams`,
+    /// and TwlSDK's `_start_LtdModuleParams`), placed as NitroSDK's linker script template places them: the static
+    /// module's autoload blocks start at the end of its initialized data, its autoload list follows the blocks, and the
+    /// LTD module's list follows its own blocks. The modules' sizes come from their sections' symbols, so the
+    /// symbols follow the code, and the lists' sizes and the start of the LTD module's blocks come from the ROM. The ROM
+    /// build writes the same values again when it puts the modules together, and the compressed ends too.
+    fn module_param_variables(
+        modules: &[LcfModule],
+        layout: &ModuleParamsLayout,
+    ) -> Vec<LcfVariable> {
+        let mut variables = vec![];
+        let Some(arm9) = modules.iter().find(|module| module.kind == ModuleKind::Arm9) else {
+            return variables;
+        };
+        let autoload_start = arm9.initialized_end().unwrap_or_else(|| arm9.origin.clone());
+        let (bss_start, bss_end) =
+            arm9.bss_bounds().unwrap_or_else(|| (autoload_start.clone(), autoload_start.clone()));
+        variables.push(LcfVariable::new(LinkTimeConst::SdkAutoloadStart, &autoload_start));
+        variables.push(LcfVariable::new(LinkTimeConst::SdkStaticBssStart, bss_start));
+        variables.push(LcfVariable::new(LinkTimeConst::SdkStaticBssEnd, bss_end));
+
+        let is_ltd =
+            |module: &&LcfModule| matches!(module.kind, ModuleKind::Autoload(AutoloadKind::Ltd(_)));
+        let blocks_end = |start: String, ltd: bool| {
+            modules
+                .iter()
+                .filter(|module| matches!(module.kind, ModuleKind::Autoload(_)))
+                .filter(|module| is_ltd(module) == ltd)
+                .filter_map(LcfModule::initialized_size)
+                .fold(start, |end, size| format!("{end} + {size}"))
+        };
+        let list = LinkTimeConst::SdkAutoloadList;
+        variables.push(LcfVariable::new(
+            list,
+            blocks_end(LinkTimeConst::SdkAutoloadStart.to_string(), false),
+        ));
+        variables.push(LcfVariable::new(
+            LinkTimeConst::SdkAutoloadListEnd,
+            format!("{list} + {:#x}", layout.autoload_list_size),
+        ));
+
+        if let Some(ltd) = &layout.ltd {
+            let list = LinkTimeConst::SdkLtdautoloadList;
+            variables.push(LcfVariable::new(
+                LinkTimeConst::SdkLtdautoloadStart,
+                format!("{:#010x}", ltd.autoload_start),
+            ));
+            variables.push(LcfVariable::new(
+                list,
+                blocks_end(LinkTimeConst::SdkLtdautoloadStart.to_string(), true),
+            ));
+            variables.push(LcfVariable::new(
+                LinkTimeConst::SdkLtdautoloadListEnd,
+                format!("{list} + {:#x}", ltd.autoload_list_size),
+            ));
+        }
+        variables
     }
 
     fn read_symbols(path: &Path) -> Result<Vec<LcfVariable>> {
@@ -426,6 +520,7 @@ impl LcfModule {
                     append_zero,
                     exceptix,
                     files,
+                    initialized: section.kind().is_initialized(),
                 }
             })
             .collect::<Vec<_>>();
@@ -443,7 +538,57 @@ impl LcfModule {
             object,
             sections,
             in_tcm,
+            kind,
         })
+    }
+
+    /// The size of the module's initialized data in the ROM, as an expression of its sections' symbols: from the start
+    /// of its first initialized section to the end of its last, rounded up to the alignment of its .text section, as
+    /// `rom config` gives an autoload's code size. `None` if the module has no initialized section.
+    fn initialized_size(&self) -> Option<String> {
+        let mut initialized = self.sections.iter().filter(|section| section.initialized);
+        let first = initialized.next()?;
+        let last = initialized.next_back().unwrap_or(first);
+        let size = format!("{} - {}", last.end_symbol, first.start_symbol);
+        let alignment = self
+            .sections
+            .iter()
+            .find(|section| section.name == ".text")
+            .map_or(1, |section| section.alignment);
+        Some(if alignment > 1 {
+            format!("({size} + {:#x}) / {alignment:#x} * {alignment:#x}", alignment - 1)
+        } else {
+            format!("({size})")
+        })
+    }
+
+    /// The end of the module's initialized data, see [`Self::initialized_size`].
+    fn initialized_end(&self) -> Option<String> {
+        let first = self.sections.iter().find(|section| section.initialized)?;
+        Some(format!("{} + {}", first.start_symbol, self.initialized_size()?))
+    }
+
+    /// The start and end of the module's .bss, from its first uninitialized section to its last.
+    fn bss_bounds(&self) -> Option<(String, String)> {
+        let mut bss = self.sections.iter().filter(|section| !section.initialized);
+        let first = bss.next()?;
+        let last = bss.next_back().unwrap_or(first);
+        Some((first.start_symbol.clone(), last.end_symbol.clone()))
+    }
+}
+
+impl ModuleParamsLayout {
+    fn new(rom: &Rom<'_>) -> Result<Self> {
+        let list_size = |autoloads: &[Autoload]| {
+            autoloads.iter().map(|autoload| autoload.info().entry_bytes().len() as u32).sum()
+        };
+        let ltd = rom.dsi().and_then(|dsi| {
+            dsi.ltd().map(|ltd| LtdParamsLayout {
+                autoload_start: dsi.config().arm9i.base_address + ltd.static_data().len() as u32,
+                autoload_list_size: list_size(ltd.autoloads()),
+            })
+        });
+        Ok(Self { autoload_list_size: list_size(&rom.arm9().autoloads()?), ltd })
     }
 }
 
@@ -846,5 +991,131 @@ lib/util/src/heap.c:
             let link_names = LinkNames::new(&map);
             assert!(Lcf::validate_all_file_names(&map, &link_names).is_err(), "{name}");
         }
+    }
+
+    /// A module of the given sections, each a name, an alignment and whether it is initialized
+    fn param_module(kind: ModuleKind, name: &str, sections: &[(&str, u32, bool)]) -> LcfModule {
+        let sections = sections
+            .iter()
+            .map(|&(section_name, alignment, initialized)| {
+                let boundary = section_name.trim_start_matches('.').to_uppercase();
+                LcfSection {
+                    name: section_name.to_string(),
+                    alignment,
+                    end_alignment: 4,
+                    start_symbol: format!("{name}_{boundary}_START"),
+                    end_symbol: format!("{name}_{boundary}_END"),
+                    append_zero: false,
+                    exceptix: false,
+                    files: vec![],
+                    initialized,
+                }
+            })
+            .collect();
+        LcfModule {
+            name: name.to_string(),
+            origin: "0x02000000".to_string(),
+            end_address: 0,
+            output_file: String::new(),
+            link_section: String::new(),
+            object: String::new(),
+            sections,
+            in_tcm: false,
+            kind,
+        }
+    }
+
+    fn param_modules() -> Vec<LcfModule> {
+        vec![
+            param_module(ModuleKind::Arm9, "ARM9", &[
+                (".text", 32, true),
+                (".data", 4, true),
+                (".sbss", 4, false),
+                (".bss", 32, false),
+            ]),
+            param_module(ModuleKind::Autoload(AutoloadKind::Itcm), "ITCM", &[
+                (".text", 32, true),
+                (".bss", 32, false),
+            ]),
+            // No .text to round the size to, and no initialized data at all
+            param_module(ModuleKind::Autoload(AutoloadKind::Dtcm), "DTCM", &[
+                (".data", 4, true),
+                (".bss", 4, false),
+            ]),
+            param_module(ModuleKind::Autoload(AutoloadKind::Unknown(2)), "AUTOLOAD_2", &[(
+                ".bss", 4, false,
+            )]),
+            param_module(LTD_MAIN, "LTD_AUTOLOAD_0", &[
+                (".text", 32, true),
+                (".ltdmain", 4, true),
+                (".bss", 32, false),
+            ]),
+            param_module(ModuleKind::Overlay(0), "OV000", &[(".text", 32, true)]),
+        ]
+    }
+
+    fn param_text(variables: &[LcfVariable]) -> Vec<String> {
+        variables.iter().map(|v| format!("{} = {};", v.symbol, v.value)).collect()
+    }
+
+    #[test]
+    fn test_module_params_follow_the_modules() {
+        let layout = ModuleParamsLayout {
+            autoload_list_size: 0x40,
+            ltd: Some(LtdParamsLayout { autoload_start: 0x02400004, autoload_list_size: 0x10 }),
+        };
+        let variables = Lcf::module_param_variables(&param_modules(), &layout);
+        assert_eq!(param_text(&variables), [
+            "SDK_AUTOLOAD_START = ARM9_TEXT_START + (ARM9_DATA_END - ARM9_TEXT_START + 0x1f) / 0x20 * 0x20;",
+            "SDK_STATIC_BSS_START = ARM9_SBSS_START;",
+            "SDK_STATIC_BSS_END = ARM9_BSS_END;",
+            "SDK_AUTOLOAD_LIST = SDK_AUTOLOAD_START + (ITCM_TEXT_END - ITCM_TEXT_START + 0x1f) / 0x20 * 0x20 + \
+             (DTCM_DATA_END - DTCM_DATA_START);",
+            "SDK_AUTOLOAD_LIST_END = SDK_AUTOLOAD_LIST + 0x40;",
+            "SDK_LTDAUTOLOAD_START = 0x02400004;",
+            "SDK_LTDAUTOLOAD_LIST = SDK_LTDAUTOLOAD_START + (LTD_AUTOLOAD_0_LTDMAIN_END - LTD_AUTOLOAD_0_TEXT_START + \
+             0x1f) / 0x20 * 0x20;",
+            "SDK_LTDAUTOLOAD_LIST_END = SDK_LTDAUTOLOAD_LIST + 0x10;",
+        ]);
+        // Every name is one that a relocation can point at
+        for variable in &variables {
+            assert!(
+                LinkTimeConst::iter().any(|c| c.name() == variable.symbol),
+                "{}",
+                variable.symbol
+            );
+        }
+    }
+
+    #[test]
+    fn test_module_params_without_ltd() {
+        let layout = ModuleParamsLayout { autoload_list_size: 0x18, ltd: None };
+        let modules = param_modules()
+            .into_iter()
+            .filter(|module| !matches!(module.kind, ModuleKind::Autoload(AutoloadKind::Ltd(_))))
+            .collect::<Vec<_>>();
+        let text = param_text(&Lcf::module_param_variables(&modules, &layout));
+        assert_eq!(text.len(), 5);
+        assert_eq!(text[4], "SDK_AUTOLOAD_LIST_END = SDK_AUTOLOAD_LIST + 0x18;");
+    }
+
+    #[test]
+    fn test_module_params_rendered_after_the_modules() {
+        let mut tt = TinyTemplate::new();
+        tt.add_template("arm9", ARM9_LCF_TEMPLATE).unwrap();
+        let layout = ModuleParamsLayout { autoload_list_size: 0x40, ltd: None };
+        let modules = param_modules();
+        let context = Arm9LcfContext {
+            module_params: Lcf::module_param_variables(&modules, &layout),
+            modules,
+            overlays: vec![],
+            variables: vec![LcfVariable::new("SDK_IRQ_STACKSIZE", "0x800")],
+        };
+        let lcf = tt.render("arm9", &context).unwrap();
+        let last_module = lcf.find("} > OV000").unwrap();
+        let list = lcf.find("SDK_AUTOLOAD_LIST = SDK_AUTOLOAD_START + (ITCM_TEXT_END").unwrap();
+        assert!(last_module < list);
+        assert!(lcf.find("SDK_IRQ_STACKSIZE = 0x800;").unwrap() < lcf.find("} > ARM9").unwrap());
+        assert!(lcf.contains("/ 0x20 * 0x20"), "the expressions are not escaped");
     }
 }
