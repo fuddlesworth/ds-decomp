@@ -23,6 +23,7 @@ use crate::{
     analysis::overlay_groups::{OverlayGroupLocation, OverlayGroups},
     config::{
         delinks::{DelinksMap, DelinksMapOptions},
+        link_names::LinkNames,
         section::SectionExt,
     },
     util::{
@@ -115,13 +116,14 @@ impl Lcf {
             migrate_sections: true,
             generate_gap_files: true,
         })?;
-        Self::validate_all_file_names(&delinks_map)?;
+        let link_names = LinkNames::new(&delinks_map);
+        Self::validate_all_file_names(&delinks_map, &link_names)?;
 
         let rom = config.load_rom(config_dir)?;
 
         let build_path = config_dir.join(&config.build_path).clean();
 
-        let link_modules = LinkModules::new(&rom, &config, &delinks_map)?;
+        let link_modules = LinkModules::new(&rom, &config, &delinks_map, &link_names)?;
 
         let mut tt = TinyTemplate::new();
         tt.add_template("arm9", ARM9_LCF_TEMPLATE)?;
@@ -143,7 +145,7 @@ impl Lcf {
             variables,
         };
         Self::write_arm9_lcf(&arm9_context, &tt, &build_path)?;
-        self.write_arm9_objects(&config, &build_path, &delinks_map)?;
+        self.write_arm9_objects(&config, &build_path, &delinks_map, &link_names)?;
 
         // mwldarm doesn't create the build directory for the modules
         create_dir_all(build_path.join("build"))?;
@@ -206,6 +208,7 @@ impl Lcf {
         config: &Config,
         lcf_path: &Path,
         delinks_map: &DelinksMap,
+        link_names: &LinkNames,
     ) -> Result<()> {
         let config_dir = self.config_path.parent().unwrap();
         let objects_file_path = lcf_path.join(ARM9_OBJECTS_FILE_NAME);
@@ -213,18 +216,19 @@ impl Lcf {
 
         let build_path = config_dir.join(&config.build_path);
         let delinks_path = config_dir.join(&config.delinks_path);
-        for line in Self::arm9_object_lines(&build_path, &delinks_path, delinks_map) {
+        for line in Self::arm9_object_lines(&build_path, &delinks_path, delinks_map, link_names) {
             writeln!(writer, "{line}")?;
         }
         Ok(())
     }
 
     /// The lines of the ARM9 program's object list: complete files' objects from `build_path`, the others' from
-    /// `delinks_path`.
+    /// `delinks_path`, and the copies of objects of a shared file name from `build_path` (see [`LinkNames`]).
     fn arm9_object_lines(
         build_path: &Path,
         delinks_path: &Path,
         delinks_map: &DelinksMap,
+        link_names: &LinkNames,
     ) -> Vec<String> {
         let mut lines = vec![];
 
@@ -246,10 +250,8 @@ impl Lcf {
                     // Listed by its migrated part, in the LTD autoload's files
                     continue;
                 }
-                let (file_path, _) = file.split_file_ext();
-                let base_path = if file.complete { build_path } else { delinks_path };
-                let file = base_path.join(file_path).with_extension("o").clean();
-                lines.push(format!("\"{}\"", file.display()));
+                let object = link_names.link_object(file, build_path, delinks_path);
+                lines.push(format!("\"{}\"", object.display()));
             }
         }
         lines
@@ -285,11 +287,14 @@ impl Lcf {
         }
     }
 
-    fn validate_all_file_names(delinks_map: &DelinksMap) -> Result<()> {
-        let mut delink_files: HashMap<String, ModuleKind> = HashMap::new();
+    /// Checks that the linker can tell the objects apart. Files of one name in different modules are linked under names
+    /// of their paths (see [`LinkNames`]), but a module may not have two files of one name, and no two files may have
+    /// one object name in the link, as a file listed in two modules or a path name that another file has would.
+    fn validate_all_file_names(delinks_map: &DelinksMap, link_names: &LinkNames) -> Result<()> {
+        let mut object_names: HashMap<String, (String, ModuleKind)> = HashMap::new();
         let mut success = true;
         for delinks in delinks_map.iter() {
-            success &= Self::validate_file_names(delinks, &mut delink_files);
+            success &= Self::validate_file_names(delinks, link_names, &mut object_names);
         }
         if !success {
             bail!("Duplicate file names found, see logs above");
@@ -299,28 +304,39 @@ impl Lcf {
 
     fn validate_file_names(
         delinks: &Delinks,
-        delink_files: &mut HashMap<String, ModuleKind>,
+        link_names: &LinkNames,
+        object_names: &mut HashMap<String, (String, ModuleKind)>,
     ) -> bool {
+        let module_kind = delinks.module_kind();
         let mut success = true;
+        let mut module_names: HashMap<String, String> = HashMap::new();
         for file in &delinks.files {
             if file.migrated() {
                 // Migrated files will have the same name as the original, that is intentional
                 continue;
             }
             let name = file.unique_name();
-            let filename = name.rsplit_once(['/', '\\']).map_or(name.as_str(), |(_, base)| base);
-            match delink_files.entry(filename.to_string()) {
+            let (path, _) = file.split_file_ext();
+            let base_name = path.rsplit_once(['/', '\\']).map_or(path.as_str(), |(_, base)| base);
+            let object_file_name = format!("{base_name}.o");
+            if let Some(other) = module_names.insert(object_file_name.clone(), name.clone()) {
+                log::error!(
+                    "Delink file name '{object_file_name}' of {name} already used by {other} in {module_kind}"
+                );
+                success = false;
+                continue;
+            }
+            match object_names.entry(link_names.object_name(file)) {
                 hash_map::Entry::Occupied(occupied_entry) => {
+                    let (other, other_kind) = occupied_entry.get();
                     log::error!(
-                        "Delink file name '{}' in {} already used in {}",
-                        filename,
-                        delinks.module_kind(),
-                        occupied_entry.get()
+                        "Object name '{}' of {name} in {module_kind} already used by {other} in {other_kind}",
+                        occupied_entry.key()
                     );
                     success = false;
                 }
                 hash_map::Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(delinks.module_kind());
+                    vacant_entry.insert((name, module_kind));
                 }
             }
         }
@@ -334,6 +350,7 @@ impl LcfModule {
         origin: String,
         config: &Config,
         delinks_map: &DelinksMap,
+        link_names: &LinkNames,
     ) -> Result<Self> {
         let module_config = match kind {
             ModuleKind::Arm9 => &config.main_module,
@@ -394,12 +411,9 @@ impl LcfModule {
                                 .by_name(&name)
                                 .map(|(_, section)| (file, section.source_name().to_string()))
                         })
-                        .map(|(file, section_name)| {
-                            let (file, _) = file.split_file_ext();
-                            let name = file
-                                .rsplit_once(['/', '\\'])
-                                .map_or(file.as_str(), |(_, basefile)| basefile);
-                            LcfFile { name: format!("{name}.o"), section_name }
+                        .map(|(file, section_name)| LcfFile {
+                            name: link_names.object_name(file),
+                            section_name,
                         })
                         .collect::<Vec<_>>()
                 };
@@ -439,8 +453,13 @@ struct LinkModules {
 }
 
 impl LinkModules {
-    pub fn new(rom: &Rom<'_>, config: &Config, delinks_map: &DelinksMap) -> Result<Self> {
-        let mut link_modules = Self::find_static(rom, config, delinks_map)?;
+    pub fn new(
+        rom: &Rom<'_>,
+        config: &Config,
+        delinks_map: &DelinksMap,
+        link_names: &LinkNames,
+    ) -> Result<Self> {
+        let mut link_modules = Self::find_static(rom, config, delinks_map, link_names)?;
         let static_end_address = link_modules.last_static_module().end_address;
         log::debug!("Static end address: {static_end_address:#010x}");
         let overlay_groups = OverlayGroups::analyze(static_end_address, rom.arm9_overlays())?;
@@ -468,13 +487,19 @@ impl LinkModules {
                     origin.clone(),
                     config,
                     delinks_map,
+                    link_names,
                 )?);
             }
         }
         Ok(link_modules)
     }
 
-    fn find_static(rom: &Rom<'_>, config: &Config, delinks_map: &DelinksMap) -> Result<Self> {
+    fn find_static(
+        rom: &Rom<'_>,
+        config: &Config,
+        delinks_map: &DelinksMap,
+        link_names: &LinkNames,
+    ) -> Result<Self> {
         let arm9 = rom.arm9();
         let mut modules = vec![];
         modules.push(LcfModule::new(
@@ -482,6 +507,7 @@ impl LinkModules {
             format!("{:#010x}", arm9.base_address()),
             config,
             delinks_map,
+            link_names,
         )?);
         let mut prev_static_index = 0;
 
@@ -501,6 +527,7 @@ impl LinkModules {
                 origin,
                 config,
                 delinks_map,
+                link_names,
             )?);
         }
 
@@ -512,6 +539,7 @@ impl LinkModules {
                     format!("{:#010x}", autoload.base_address()),
                     config,
                     delinks_map,
+                    link_names,
                 )?);
             }
         }
@@ -528,6 +556,7 @@ mod tests {
     use ds_decomp::config::section::LTD_MAIN_AUTOLOAD_INDEX;
 
     use super::*;
+    use crate::config::link_names::object_to_link;
 
     const LTD_MAIN: ModuleKind = ModuleKind::Autoload(AutoloadKind::Ltd(LTD_MAIN_AUTOLOAD_INDEX));
 
@@ -570,16 +599,30 @@ ltd_b.c:
 ";
 
     fn delinks_map(name: &str, migrate_sections: bool) -> DelinksMap {
+        delinks_map_of(
+            name,
+            &[(ModuleKind::Arm9, MAIN_DELINKS), (LTD_MAIN, LTD_DELINKS)],
+            migrate_sections,
+        )
+    }
+
+    /// The delinks of each module from its delinks.txt
+    fn delinks_map_of(
+        name: &str,
+        modules: &[(ModuleKind, &str)],
+        migrate_sections: bool,
+    ) -> DelinksMap {
         let dir = std::env::temp_dir().join(format!("dsd-test-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let main_path = dir.join("main_delinks.txt");
-        let ltd_path = dir.join("ltd_delinks.txt");
-        std::fs::write(&main_path, MAIN_DELINKS).unwrap();
-        std::fs::write(&ltd_path, LTD_DELINKS).unwrap();
-        let delinks = vec![
-            Delinks::from_file(&main_path, ModuleKind::Arm9).unwrap(),
-            Delinks::from_file(&ltd_path, LTD_MAIN).unwrap(),
-        ];
+        let delinks = modules
+            .iter()
+            .enumerate()
+            .map(|(index, &(kind, text))| {
+                let path = dir.join(format!("delinks_{index}.txt"));
+                std::fs::write(&path, text).unwrap();
+                Delinks::from_file(&path, kind).unwrap()
+            })
+            .collect();
         std::fs::remove_dir_all(&dir).unwrap();
         DelinksMap::new(delinks, DelinksMapOptions { migrate_sections, generate_gap_files: true })
             .unwrap()
@@ -660,7 +703,7 @@ ltd_b.c:
         let map = delinks_map("objects", true);
         let build = Path::new("build");
         let delinks = Path::new("delinks");
-        let lines = Lcf::arm9_object_lines(build, delinks, &map)
+        let lines = Lcf::arm9_object_lines(build, delinks, &map, &LinkNames::new(&map))
             .into_iter()
             .filter(|line| !line.contains("_dsd_gap@"))
             .collect::<Vec<_>>();
@@ -695,5 +738,113 @@ ltd_b.c:
             "_dsd_gap@ltd_autoload_0_0".to_string(),
             vec![(".ltdmain".to_string(), 0x02700070, 0x02700080)]
         )]);
+    }
+
+    // A game's heap.c and main.c in ARM9 main, and a library's files of the same names in an overlay
+    const SHARED_MAIN_DELINKS: &str = "
+    .text       start:0x02000000 end:0x02000100 kind:code align:32
+
+src/main.c:
+    complete
+    .text       start:0x02000000 end:0x02000040
+
+src/heap.c:
+    .text       start:0x02000040 end:0x02000080
+
+src/other.c:
+    complete
+    .text       start:0x02000080 end:0x02000100
+";
+
+    const SHARED_OVERLAY_DELINKS: &str = "
+    .text       start:0x02200000 end:0x02200100 kind:code align:32
+
+lib/util/src/main.c:
+    complete
+    .text       start:0x02200000 end:0x02200040
+
+lib/util/src/heap.c:
+    complete
+    .text       start:0x02200040 end:0x02200100
+";
+
+    const OVERLAY_1: ModuleKind = ModuleKind::Overlay(1);
+    const OVERLAY_2: ModuleKind = ModuleKind::Overlay(2);
+
+    fn file<'a>(map: &'a DelinksMap, kind: ModuleKind, name: &str) -> &'a DelinkFile {
+        let [file] = files_named(map.get(kind).unwrap(), name)[..] else { panic!("{name}") };
+        file
+    }
+
+    #[test]
+    fn test_shared_file_names_link_under_path_names() {
+        let map = delinks_map_of(
+            "shared",
+            &[(ModuleKind::Arm9, SHARED_MAIN_DELINKS), (OVERLAY_1, SHARED_OVERLAY_DELINKS)],
+            true,
+        );
+        let link_names = LinkNames::new(&map);
+        assert!(Lcf::validate_all_file_names(&map, &link_names).is_ok());
+
+        // Each object of a shared file name has a name of its path in the linker script, the others their file name
+        let names = [
+            (ModuleKind::Arm9, "src/main.c", "src_main.o"),
+            (ModuleKind::Arm9, "src/heap.c", "src_heap.o"),
+            (ModuleKind::Arm9, "src/other.c", "other.o"),
+            (OVERLAY_1, "lib/util/src/main.c", "lib_util_src_main.o"),
+            (OVERLAY_1, "lib/util/src/heap.c", "lib_util_src_heap.o"),
+        ];
+        for (kind, name, object_name) in names {
+            assert_eq!(link_names.object_name(file(&map, kind, name)), object_name);
+        }
+
+        // The object list gives their copies, made from the compiled or the delinked object, under link/
+        let build = Path::new("build");
+        let delinks = Path::new("build/delinks");
+        let heap = file(&map, ModuleKind::Arm9, "src/heap.c");
+        assert_eq!(object_to_link(heap, build, delinks), Path::new("build/delinks/src/heap.o"));
+        let lines = Lcf::arm9_object_lines(build, delinks, &map, &link_names)
+            .into_iter()
+            .filter(|line| !line.contains("_dsd_gap@"))
+            .collect::<Vec<_>>();
+        assert_eq!(lines, [
+            "\"build/link/src/src_main.o\"",
+            "\"build/link/src/src_heap.o\"",
+            "\"build/src/other.o\"",
+            "-overlaygroup OV001,0",
+            "-overlay OV001",
+            "\"build/link/lib/util/src/lib_util_src_main.o\"",
+            "\"build/link/lib/util/src/lib_util_src_heap.o\"",
+        ]);
+    }
+
+    #[test]
+    fn test_file_names_the_linker_cant_tell_apart() {
+        let clashes = [
+            // Two files of one name in one module
+            (
+                "module",
+                SHARED_MAIN_DELINKS.replace("src/other.c", "lib/heap.c"),
+                SHARED_OVERLAY_DELINKS.to_string(),
+            ),
+            // One file in two modules
+            (
+                "twice",
+                SHARED_MAIN_DELINKS.to_string(),
+                SHARED_OVERLAY_DELINKS.replace("lib/util/src/", "src/"),
+            ),
+            // A file named as another's object is linked
+            (
+                "path",
+                SHARED_MAIN_DELINKS.replace("src/other.c", "src_heap.c"),
+                SHARED_OVERLAY_DELINKS.to_string(),
+            ),
+        ];
+        for (name, main, overlay) in clashes {
+            let map =
+                delinks_map_of(name, &[(ModuleKind::Arm9, &main), (OVERLAY_2, &overlay)], true);
+            let link_names = LinkNames::new(&map);
+            assert!(Lcf::validate_all_file_names(&map, &link_names).is_err(), "{name}");
+        }
     }
 }

@@ -7,7 +7,10 @@ use serde::Serialize;
 
 use crate::{
     cmd::ARM9_LCF_FILE_NAME,
-    config::delinks::{DelinksMap, DelinksMapOptions},
+    config::{
+        delinks::{DelinksMap, DelinksMapOptions},
+        link_names::{LinkNames, object_to_link},
+    },
     util::path::PathExt,
 };
 
@@ -29,7 +32,11 @@ pub struct ModulesJson {
 pub struct DelinkFileJson {
     pub name: String,
     pub delink_file: PathBuf,
+    /// The object that the link takes the file's code and data from.
     pub object_to_link: PathBuf,
+    /// The path that the link's object list gives for it: `object_to_link`, or a copy of it that the build makes when
+    /// another file has the same file name, which the linker script can't tell apart otherwise (see [`LinkNames`]).
+    pub link_object: PathBuf,
 }
 
 impl JsonDelinks {
@@ -55,15 +62,21 @@ impl JsonDelinks {
             generate_gap_files: true,
         })?;
 
+        let link_names = LinkNames::new(&delinks_map);
         let files = delinks_map
             .delink_files()
             .map(|file| {
                 let (file_path, _) = file.split_file_ext();
-                let base_path = if file.complete { &build_path } else { &delinks_path };
-                let object_to_link = base_path.join(&file_path).clean().with_extension("o");
+                let object_to_link = object_to_link(file, &build_path, &delinks_path);
+                let link_object = link_names.link_object(file, &build_path, &delinks_path);
                 let delink_file = delinks_path.join(&file_path).clean().with_extension("o");
 
-                Ok(DelinkFileJson { name: file.unique_name(), delink_file, object_to_link })
+                Ok(DelinkFileJson {
+                    name: file.unique_name(),
+                    delink_file,
+                    object_to_link,
+                    link_object,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
 

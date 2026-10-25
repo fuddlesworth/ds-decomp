@@ -130,6 +130,13 @@ Options:
 
 Generates a linker command file (LCF) for `mwldarm`.
 
+The LCF names an object by its file name alone, as in `heap.o(.text)`, which is all `mwldarm` reads there. Files of one
+name in different directories, such as `src/heap.c` and `lib/util/src/heap.c` in different modules, are linked from
+copies of their objects named after their paths, `build/link/src/src_heap.o` and
+`build/link/lib/util/src/lib_util_src_heap.o`, which the build makes from each file's object (`link_object` and
+`object_to_link` in [`json delinks`](#json-delinks)). Two files of one name in one module, one file in two modules, and
+a file named like another's path name are errors.
+
 ```shell
 $ dsd lcf --config-path path/to/config.yaml --lcf-file path/to/linker_script.lcf --objects-file path/to/objects.txt
 ```
@@ -141,7 +148,7 @@ Options:
 
 ### `json delinks`
 
-Meant to be used by build systems. Outputs a JSON-formatted object containing information about which files [`delink`](#delink) generates and files needed for linking.
+Meant to be used by build systems. Outputs a JSON-formatted object containing information about which files [`delink`](#delink) generates and files needed for linking. Each file's `object_to_link` is the object its code and data are linked from, and `link_object` the path in the objects list: the same, or the copy that the build must make of it when another file has the same file name (see [`lcf`](#lcf)).
 
 ```shell
 $ dsd json delinks --config-path path/to/config.yaml
