@@ -473,6 +473,10 @@ impl Display for DisplaySectionInherited<'_> {
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum MigrateSection {
     Dtcm,
+    /// Initialized DTCM data from an object that also has an ARM9 main part
+    DtcmData,
+    /// Zero-initialized DTCM data from the same object
+    DtcmBss,
     Itcm,
     AutoloadData(u32),
     AutoloadBss(u32),
@@ -486,6 +490,8 @@ pub enum MigrateSection {
 }
 
 const DTCM_SECTION: &str = ".dtcm";
+const DTCM_DATA_SECTION: &str = ".dtcm.data";
+const DTCM_BSS_SECTION: &str = ".dtcm.bss";
 const ITCM_SECTION: &str = ".itcm";
 const AUTOLOAD_DATA_SECTION_PREFIX: &str = ".autodata_";
 const AUTOLOAD_BSS_SECTION_PREFIX: &str = ".autobss_";
@@ -507,6 +513,8 @@ impl MigrateSection {
     pub fn parse(name: &str, src_module: ModuleKind) -> Result<Option<Self>, MigrateSectionError> {
         match name {
             DTCM_SECTION => Ok(Some(Self::Dtcm)),
+            DTCM_DATA_SECTION => Ok(Some(Self::DtcmData)),
+            DTCM_BSS_SECTION => Ok(Some(Self::DtcmBss)),
             ITCM_SECTION => Ok(Some(Self::Itcm)),
             EXCEPTION_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exception)),
             EXCEPTIX_SECTION if src_module != ModuleKind::Arm9 => Ok(Some(Self::Exceptix)),
@@ -534,6 +542,8 @@ impl MigrateSection {
     pub fn source_name(&self) -> Cow<'static, str> {
         match self {
             MigrateSection::Dtcm => DTCM_SECTION.into(),
+            MigrateSection::DtcmData => DTCM_DATA_SECTION.into(),
+            MigrateSection::DtcmBss => DTCM_BSS_SECTION.into(),
             MigrateSection::Itcm => ITCM_SECTION.into(),
             MigrateSection::AutoloadData(index) => {
                 format!("{AUTOLOAD_DATA_SECTION_PREFIX}{index}").into()
@@ -550,7 +560,8 @@ impl MigrateSection {
 
     pub fn target_name(&self) -> &str {
         match self {
-            MigrateSection::Dtcm => ".bss",
+            MigrateSection::Dtcm | MigrateSection::DtcmBss => ".bss",
+            MigrateSection::DtcmData => ".data",
             MigrateSection::Itcm => ".text",
             MigrateSection::AutoloadData(_) => ".data",
             MigrateSection::AutoloadBss(_) => ".bss",
@@ -575,7 +586,9 @@ impl MigrateSection {
         match module_kind {
             ModuleKind::Arm9 => vec![],
             ModuleKind::Overlay(_) => vec![],
-            ModuleKind::Autoload(AutoloadKind::Dtcm) => vec![MigrateSection::Dtcm],
+            ModuleKind::Autoload(AutoloadKind::Dtcm) => {
+                vec![MigrateSection::Dtcm, MigrateSection::DtcmData, MigrateSection::DtcmBss]
+            }
             ModuleKind::Autoload(AutoloadKind::Itcm) => vec![MigrateSection::Itcm],
             ModuleKind::Autoload(AutoloadKind::Unknown(index)) => {
                 vec![MigrateSection::AutoloadData(index), MigrateSection::AutoloadBss(index)]
@@ -590,7 +603,8 @@ impl MigrateSection {
 
     pub fn section_kind(&self) -> SectionKind {
         match self {
-            MigrateSection::Dtcm => SectionKind::Bss,
+            MigrateSection::Dtcm | MigrateSection::DtcmBss => SectionKind::Bss,
+            MigrateSection::DtcmData => SectionKind::Data,
             MigrateSection::Itcm => SectionKind::Code,
             MigrateSection::AutoloadData(_) => SectionKind::Data,
             MigrateSection::AutoloadBss(_) => SectionKind::Bss,
@@ -603,7 +617,9 @@ impl MigrateSection {
 
     pub fn module_kind(&self) -> ModuleKind {
         match self {
-            MigrateSection::Dtcm => ModuleKind::Autoload(AutoloadKind::Dtcm),
+            MigrateSection::Dtcm | MigrateSection::DtcmData | MigrateSection::DtcmBss => {
+                ModuleKind::Autoload(AutoloadKind::Dtcm)
+            }
             MigrateSection::Itcm => ModuleKind::Autoload(AutoloadKind::Itcm),
             MigrateSection::AutoloadData(index) | MigrateSection::AutoloadBss(index) => {
                 ModuleKind::Autoload(AutoloadKind::Unknown(*index))
@@ -873,6 +889,33 @@ mod tests {
         assert_eq!(parse(".exception", ModuleKind::Overlay(1)), Some(MigrateSection::Exception));
         assert_eq!(parse(".text", ModuleKind::Arm9), None);
         assert!(MigrateSection::parse(".autobss_x", ModuleKind::Arm9).is_err());
+    }
+
+    #[test]
+    fn test_dtcm_data_and_bss_migrations() {
+        let target = ModuleKind::Autoload(AutoloadKind::Dtcm);
+        let data = MigrateSection::DtcmData;
+        let bss = MigrateSection::DtcmBss;
+        assert_eq!(parse(".dtcm.data", ModuleKind::Arm9), Some(data));
+        assert_eq!(parse(".dtcm.bss", ModuleKind::Arm9), Some(bss));
+        assert_eq!(data.source_name(), ".dtcm.data");
+        assert_eq!(bss.source_name(), ".dtcm.bss");
+        assert_eq!(data.target_name(), ".data");
+        assert_eq!(bss.target_name(), ".bss");
+        assert_eq!(data.module_kind(), target);
+        assert_eq!(bss.module_kind(), target);
+        assert!(data.section_kind() == SectionKind::Data);
+        assert!(bss.section_kind() == SectionKind::Bss);
+        assert!(!data.is_ltd());
+        assert!(!bss.is_ltd());
+        assert_eq!(MigrateSection::sections_to_migrate(target), vec![
+            MigrateSection::Dtcm,
+            data,
+            bss
+        ]);
+        // Preserve the existing .dtcm spelling and its zero-initialized behavior.
+        assert_eq!(MigrateSection::Dtcm.target_name(), ".bss");
+        assert!(MigrateSection::Dtcm.section_kind() == SectionKind::Bss);
     }
 
     #[test]
