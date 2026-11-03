@@ -18,6 +18,11 @@ pub struct Build {
     #[arg(long, short = '7')]
     arm7_bios: Option<PathBuf>,
 
+    /// Build a DSi ROM even if the ARM9 secure area changed and no ARM7 BIOS is given, keeping
+    /// the stale DSi values derived from the secure area
+    #[arg(long)]
+    allow_stale_secure_area: bool,
+
     /// Output ROM
     #[arg(long, short = 'o')]
     rom: PathBuf,
@@ -39,7 +44,7 @@ impl Build {
             }
             result => result?,
         };
-        let raw_rom = rom.build(key.as_ref())?;
+        let raw_rom = rom.build_with(key.as_ref(), self.allow_stale_secure_area)?;
         raw_rom.save(&self.rom)?;
         Ok(())
     }
