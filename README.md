@@ -56,6 +56,7 @@ $ dsd rom build --config path/to/extract/config.yaml --rom path/to/built_rom.nds
 Options:
 - `-c`, `--config`: Path to `config.yaml` in the extract directory.
 - `-7`, `--arm7-bios`: Path to ARM7 BIOS file, needed for encryption.
+- `--allow-stale-secure-area`: Build a DSi ROM whose ARM9 secure area changed since extracting without the ARM7 BIOS, keeping the secure area values stored when extracting. Their CRC, digests and SHA1-HMAC then no longer match the secure area.
 - `-o`, `--rom`: Path to ROM file.
 
 ### `rom config`
